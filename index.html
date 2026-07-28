@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tech Pack Extractor — Haddad Brands</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+<div class="wrap">
+
+  <div class="pw-overlay" id="pwOverlay" hidden>
+    <div class="pw-modal">
+      <div class="pw-icon-wrap">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      </div>
+      <h2 id="pwTitle">Password Required</h2>
+      <p id="pwSub">Enter the password to continue.</p>
+      <input type="password" id="pwInput" placeholder="Password" autocomplete="off">
+      <div class="pw-error" id="pwError"></div>
+      <div class="pw-actions">
+        <button class="btn secondary" id="pwCancel">Cancel</button>
+        <button class="btn" id="pwSubmit">Unlock</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ HOME VIEW ============ -->
+  <div class="home-view" id="homeView">
+    <div class="home-header">
+      <h1>BOM <span>Generator</span></h1>
+    </div>
+    <div class="brand-grid">
+      <button class="brand-card" id="brandHaddad" style="--glow:rgba(200,40,40,.35); --mark-bg:#C82828;">
+        <div class="brand-card-mark">H</div>
+        <div class="brand-card-name">HADDAD</div>
+      </button>
+      <button class="brand-card" id="brandDecathlon" style="--glow:rgba(37,99,235,.35); --mark-bg:#2563EB;">
+        <div class="brand-card-mark">D</div>
+        <div class="brand-card-name">Decathlon</div>
+      </button>
+      <button class="brand-card" id="brandMalacca" style="--glow:rgba(16,150,100,.35); --mark-bg:#0F9960;">
+        <div class="brand-card-mark">M</div>
+        <div class="brand-card-name">Malacca</div>
+      </button>
+    </div>
+  </div>
+
+  <!-- ============ HADDAD TOOL VIEW ============ -->
+  <div class="tool-view" id="haddadView" hidden>
+    <button class="back-btn" id="backBtn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+      Back
+    </button>
+
+    <div class="card hero-card">
+      <div class="hero-top">
+        <div class="hero-copy">
+          <div class="badge"><span class="dot"></span>Tech Pack Utility</div>
+          <h1>PDF <span class="arrow-glyph">→</span> Excel Extractor</h1>
+        </div>
+        <div class="hero-pills">
+          <span class="pill">BOM</span>
+        </div>
+      </div>
+      <p class="lede">Create BOM sheet with one click.</p>
+    </div>
+
+    <div class="dropzone" id="dropzone">
+      <input type="file" id="fileInput" accept="application/pdf">
+      <div class="dz-icon-wrap">
+        <svg class="dz-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M12 15l-4.5-4.5M12 15l4.5-4.5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+      </div>
+      <div class="dz-title">Drop PDF here or click to browse</div>
+      <div class="dz-sub">RUNS ENTIRELY IN YOUR BROWSER — NOTHING IS UPLOADED</div>
+    </div>
+
+    <div class="filebar" id="filebar">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+      <span class="name" id="fileName"></span>
+      <span class="clear" id="clearFile">✕ remove</span>
+    </div>
+
+    <button class="btn" id="processBtn" disabled>
+      <svg class="spinner" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"/><path d="M22 12a10 10 0 0 0-10-10" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>
+      <span id="processLabel">Extract to Excel</span>
+    </button>
+
+    <div class="status" id="status"></div>
+
+    <div class="results" id="results">
+      <button class="btn secondary" id="downloadBtn" style="margin-top:0;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M12 15l-4.5-4.5M12 15l4.5-4.5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+        Download Excel File
+      </button>
+
+      <div class="card cbd-section">
+        <div class="cbd-head">
+          <div class="icon-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"/><path d="M4 10h16M10 4v16"/></svg>
+          </div>
+          <div>
+            <h2>Cost Break Down Format</h2>
+            <p>Insert these items into the LVB‑PX Cost Break Down template — Fabric → Fabric, Print/Heat Transfer/Embroidery → Print/Heat Transfer/Embroidery, Trim + Labels &amp; Packaging → Accessories. Existing formulas, the header banner, and the pre‑filled standard accessory rows are preserved; new rows are inserted automatically if there isn't enough room.</p>
+          </div>
+        </div>
+        <button class="btn" id="cbdBtn">
+          <svg class="spinner" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"/><path d="M22 12a10 10 0 0 0-10-10" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>
+          <span id="cbdLabel">Generate Cost Break Down Excel</span>
+        </button>
+        <div class="status" id="cbdStatus"></div>
+      </div>
+    </div>
+
+    <div class="bug-section" id="bugSection">
+      <button class="bug-toggle" id="bugToggle" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a4 4 0 0 0-4 4v1H7a2 2 0 0 0-2 2v1H3v2h2v1a7 7 0 0 0 14 0v-1h2v-2h-2V9a2 2 0 0 0-2-2h-1V6a4 4 0 0 0-4-4z"/><path d="M12 8v9M8 12H4M20 12h-4"/></svg>
+        Report a bug or error
+      </button>
+      <form class="bug-form" id="bugForm" hidden>
+        <div class="bug-form-grid">
+          <div class="field">
+            <label for="bugName">Name</label>
+            <input type="text" id="bugName" name="name" required>
+          </div>
+          <div class="field">
+            <label for="bugEmail">Email</label>
+            <input type="email" id="bugEmail" name="email" required>
+          </div>
+        </div>
+        <div class="field">
+          <label for="bugMessage">What happened?</label>
+          <textarea id="bugMessage" name="message" rows="4" required placeholder="Describe the bug or error you ran into..."></textarea>
+        </div>
+        <button class="btn" id="bugSendBtn" type="submit">
+          <svg class="spinner" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"/><path d="M22 12a10 10 0 0 0-10-10" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>
+          <span id="bugSendLabel">Send Report</span>
+        </button>
+        <div class="status" id="bugStatus"></div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ============ DECATHLON TOOL VIEW ============ -->
+  <div class="tool-view" id="decathlonView" hidden>
+    <button class="back-btn" id="backBtnDec">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+      Back
+    </button>
+
+    <div class="card hero-card">
+      <div class="hero-top">
+        <div class="hero-copy">
+          <div class="badge"><span class="dot"></span>Decathlon BOM Utility</div>
+          <h1>Tech Pack <span class="arrow-glyph">→</span> Costing Sheet</h1>
+        </div>
+        <div class="hero-pills">
+          <span class="pill">BOM</span>
+        </div>
+      </div>
+      <p class="lede">Upload one Decathlon tech pack (one CC) and enter the R3 number(s) you want to cost from it. Once you're done with that CC you can add another tech pack, or finish and get one Excel file with a tab per CC (and per BOM variant within it).</p>
+    </div>
+
+    <div class="dropzone" id="dropzoneDec">
+      <input type="file" id="fileInputDec" accept="application/pdf">
+      <div class="dz-icon-wrap">
+        <svg class="dz-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M12 15l-4.5-4.5M12 15l4.5-4.5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+      </div>
+      <div class="dz-title">Drop the tech pack PDF here or click to browse</div>
+      <div class="dz-sub">RUNS ENTIRELY IN YOUR BROWSER — NOTHING IS UPLOADED</div>
+    </div>
+
+    <div class="filebar" id="filebarDec">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+      <span class="name" id="fileNameDec"></span>
+      <span class="clear" id="clearFileDec">✕ remove</span>
+    </div>
+
+    <div class="card" style="padding:22px 26px; margin-bottom:20px;">
+      <label for="r3Input" style="display:block; font-weight:600; font-size:14px; margin-bottom:10px;">R3 number(s) to cost</label>
+      <textarea id="r3Input" placeholder="e.g. 9067996, 8668176, 9060786&#10;(one per line or comma-separated — one tab is created per distinct BOM, identical R3s are merged automatically)" style="width:100%; height:88px; border:1.5px solid var(--border); border-radius:12px; padding:12px 16px; font-family:var(--font); font-size:15px; box-sizing:border-box; resize:vertical;"></textarea>
+    </div>
+
+    <button class="btn" id="processBtnDec" disabled>
+      <svg class="spinner" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"/><path d="M22 12a10 10 0 0 0-10-10" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>
+      <span id="processLabelDec">Extract R3(s) from Tech Pack</span>
+    </button>
+
+    <div class="status" id="statusDec"></div>
+
+    <div class="results" id="resultsDec">
+      <div id="sessionBannerDec" style="display:none; background:#EFF6FF; border:1.5px solid #BFDBFE; border-radius:12px; padding:14px 18px; margin-bottom:18px; font-size:14px; color:#1E40AF; font-weight:600;"></div>
+
+      <button class="btn secondary" id="downloadBtnDec" style="margin-top:0;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M12 15l-4.5-4.5M12 15l4.5-4.5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+        Download Extracted Data (Excel)
+      </button>
+
+      <div class="card cbd-section">
+        <div class="cbd-head">
+          <div class="icon-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"/><path d="M4 10h16M10 4v16"/></svg>
+          </div>
+          <div>
+            <h2>Decathlon Costing Format</h2>
+            <p>Each CC (tech pack) gets its own tab named after its CC number; R3s with a genuinely different BOM within that CC get "CC V1 / V2 ..." tabs, identical-BOM R3s are merged automatically. Sales Packaging's existing rows are kept as-is — extracted items are appended below them. All existing formulas are preserved; new rows are inserted automatically if there isn't enough room.</p>
+          </div>
+        </div>
+        <div style="display:flex; gap:12px; flex-wrap:wrap;">
+          <button class="btn secondary" id="addAnotherCcBtn" style="flex:1; min-width:220px; margin-top:0;">
+            + Upload Another CC (Tech Pack)
+          </button>
+          <button class="btn" id="cbdBtnDec" style="flex:1; min-width:220px;">
+            <svg class="spinner" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"/><path d="M22 12a10 10 0 0 0-10-10" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>
+            <span id="cbdLabelDec">Finish Uploading & Generate Costing Excel</span>
+          </button>
+        </div>
+        <div class="status" id="cbdStatusDec"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ MALACCA TOOL VIEW ============ -->
+  <div class="tool-view" id="malaccaView" hidden>
+    <button class="back-btn" id="backBtnMal">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+      Back
+    </button>
+
+    <div class="card hero-card">
+      <div class="hero-top">
+        <div class="hero-copy">
+          <div class="badge"><span class="dot"></span>Malacca BOM Utility</div>
+          <h1>Tech Pack <span class="arrow-glyph">→</span> Supply Chain / CBD</h1>
+        </div>
+        <div class="hero-pills">
+          <span class="pill">BOM</span>
+        </div>
+      </div>
+      <p class="lede">Upload a Malacca (Sportmaster/Kappa-style) tech pack PDF. We'll pull every Fabric, Trims, Decoration, Product Packaging and Shipping & Packing line, then let you export a Supply Chain worksheet or generate the full CBD costing file.</p>
+    </div>
+
+    <div class="dropzone" id="dropzoneMal">
+      <input type="file" id="fileInputMal" accept="application/pdf">
+      <div class="dz-icon-wrap">
+        <svg class="dz-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M12 15l-4.5-4.5M12 15l4.5-4.5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+      </div>
+      <div class="dz-title">Drop the tech pack PDF here or click to browse</div>
+      <div class="dz-sub">RUNS ENTIRELY IN YOUR BROWSER — NOTHING IS UPLOADED</div>
+    </div>
+
+    <div class="filebar" id="filebarMal">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+      <span class="name" id="fileNameMal"></span>
+      <span class="clear" id="clearFileMal">✕ remove</span>
+    </div>
+
+    <button class="btn" id="processBtnMal" disabled>
+      <svg class="spinner" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"/><path d="M22 12a10 10 0 0 0-10-10" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>
+      <span id="processLabelMal">Extract Tech Pack</span>
+    </button>
+
+    <div class="status" id="statusMal"></div>
+
+    <div class="results" id="resultsMal">
+      <div class="card cbd-section">
+        <div class="cbd-head">
+          <div class="icon-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"/><path d="M4 10h16M10 4v16"/></svg>
+          </div>
+          <div>
+            <h2>For Supply Chain</h2>
+            <p>Two-tab Excel: Fabric (Fabric category, Fabric code, Reference no, Description, Supplier) and Trims (Item name, Item code, Reference no, Size, Description, Supplier) — Trims covers every non-Fabric section combined.</p>
+          </div>
+        </div>
+        <button class="btn secondary" id="supplyChainBtnMal" style="margin-top:0;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M12 15l-4.5-4.5M12 15l4.5-4.5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+          For Supply Chain
+        </button>
+      </div>
+
+      <div class="card cbd-section">
+        <div class="cbd-head">
+          <div class="icon-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"/><path d="M4 10h16M10 4v16"/></svg>
+          </div>
+          <div>
+            <h2>Generate CBD</h2>
+            <p>Fills the CBD costing format's Fabric / Trims / Decoration / Product Packaging / Shipping & Packing sections. Existing formulas, roll-up totals and the CMT/Overhead/Profit/Miscellaneous rows are preserved; new rows are inserted automatically if a section needs more room.</p>
+          </div>
+        </div>
+        <button class="btn" id="cbdBtnMal">
+          <svg class="spinner" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"/><path d="M22 12a10 10 0 0 0-10-10" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>
+          <span id="cbdLabelMal">Generate CBD</span>
+        </button>
+        <div class="status" id="cbdStatusMal"></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script src="js/shared.js"></script>
+<script src="js/haddad.js"></script>
+<script src="js/decathlon.js"></script>
+<script src="js/malacca.js"></script>
+</body>
+</html>
