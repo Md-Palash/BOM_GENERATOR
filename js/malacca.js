@@ -503,12 +503,14 @@ async function buildMalaccaCBD(templateArrayBuffer, sections, styleNumber, cover
 
 
 /* ============================================================
-   MALACCA — UI WIRING (no password required)
+   MALACCA — UI WIRING
    ============================================================ */
 const malaccaView = document.getElementById('malaccaView');
 document.getElementById('brandMalacca').addEventListener('click', () => {
-  homeView.hidden = true;
-  malaccaView.hidden = false;
+  requestUnlock('malacca', () => {
+    homeView.hidden = true;
+    malaccaView.hidden = false;
+  });
 });
 document.getElementById('backBtnMal').addEventListener('click', () => {
   malaccaView.hidden = true;
