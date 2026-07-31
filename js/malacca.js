@@ -14,7 +14,10 @@ const MALACCA_TEMPLATE_B64 = "UEsDBBQABgAIAAAAIQDtx4ohCQIAAKUMAAATAAgCW0NvbnRlbn
 // Reference No. / Supplier / Nominated? / Color / Comments-SM / Size /
 // Consumption / Article UOM / Cuttable Width / Cuttable Width-Color /
 // Comments-Supplier).
-const MALACCA_COLUMNS = [
+// Fallback column boundaries (points, PDF user space), calibrated against
+// the original single-colorway sample with no Finish/Price columns. Used
+// only if a page's own header row can't be parsed for some reason.
+const MALACCA_COLUMNS_FALLBACK = [
   { key: 'placement',           max: 58.5 },
   { key: 'componentName',       max: 118.05 },
   { key: 'materialType',        max: 165.7 },
@@ -31,9 +34,65 @@ const MALACCA_COLUMNS = [
   { key: 'cuttableWidthColor',  max: 715.0 },
   { key: 'commentsSupplier',    max: Infinity },
 ];
-function classifyMalaccaColumn(x) {
-  for (const c of MALACCA_COLUMNS) if (x < c.max) return c.key;
-  return 'commentsSupplier';
+
+// These are the columns the merge engine actually reads downstream
+// (buildMalaccaCBD / buildMalaccaSupplyChain never touch nominated, color,
+// commentsSM, or commentsSupplier). Any *other* column a given tech pack
+// happens to include — a 2nd/3rd colorway, "Finish", "Price" — varies
+// between products and isn't needed, so it's fine for that data to fall
+// into whichever bucket its x lands in; it's discarded either way. What
+// matters is that these required columns stay correctly anchored no
+// matter how many extra columns are inserted around them.
+const MALACCA_REQUIRED_COLUMNS = [
+  'placement', 'componentName', 'materialType', 'material',
+  'referenceNo', 'supplier', 'size', 'consumption', 'articleUOM',
+];
+
+// Derives this page's column boundaries from its own header row instead of
+// assuming a fixed pixel layout — some Malacca tech packs add a second (or
+// third) colorway column, or "Finish"/"Price" columns, which shifts every
+// column after them. Anchoring on each required column's own label makes
+// extraction immune to how many extra columns sit around it.
+function deriveMalaccaColumnBoundaries(headerItems) {
+  function anchorX(text, occurrence) {
+    const matches = headerItems.filter(it => it.text === text).sort((a, b) => a.x - b.x);
+    return matches[occurrence] !== undefined ? matches[occurrence].x : null;
+  }
+  const candidates = [
+    ['placement',          anchorX('Placement', 0)],
+    ['componentName',      anchorX('Compone', 0)],
+    ['materialType',       anchorX('Material', 0)], // "Material Type" always precedes "Material"
+    ['material',           anchorX('Material', 1)],
+    ['referenceNo',        anchorX('Reference', 0)],
+    ['supplier',           anchorX('Supplier', 0)],
+    ['nominated',          anchorX('Nominate', 0)],
+    ['commentsSM',         anchorX('Comment', 0)],
+    ['finish',             anchorX('Finish', 0)],   // optional
+    ['size',               anchorX('Size', 0)],
+    ['consumption',        anchorX('Consump', 0)],
+    ['articleUOM',         anchorX('Article', 0)],
+    ['price',              anchorX('Price', 0)],    // optional
+    ['cuttableWidth',      anchorX('Cuttable', 0)], // "Cuttable Width" always precedes "-Color"
+    ['cuttableWidthColor', anchorX('Cuttable', 1)],
+  ];
+
+  const present = candidates.filter(([, x]) => x !== null);
+  const foundKeys = new Set(present.map(([key]) => key));
+  for (const key of MALACCA_REQUIRED_COLUMNS) {
+    if (!foundKeys.has(key)) return null; // couldn't parse this header — caller falls back
+  }
+
+  present.sort((a, b) => a[1] - b[1]);
+  return present.map(([key, x], i) => ({
+    key,
+    max: i + 1 < present.length ? (x + present[i + 1][1]) / 2 : Infinity,
+  }));
+}
+
+function classifyMalaccaColumn(x, columns) {
+  const cols = columns || MALACCA_COLUMNS_FALLBACK;
+  for (const c of cols) if (x < c.max) return c.key;
+  return cols.length ? cols[cols.length - 1].key : 'commentsSupplier';
 }
 
 const MALACCA_SECTION_RE = /^Section:\s*(\d+)\s*-\s*(.+)$/;
@@ -188,7 +247,7 @@ async function extractMalaccaCoverImage(page, viewport) {
 // Sketch, Construction Detail) doesn't, and some of those (Graded
 // Measurement in particular) contain numeric-looking data that could
 // otherwise be misread as BOM rows.
-const MALACCA_BOM_PAGE_RE = /\bBOM[_:]/;
+const MALACCA_BOM_PAGE_RE = /\bBOM[_:]/i;
 
 // Tokens that make up the (multi-line) BOM table header/its wrapped
 // fragments — used to skip header rows during extraction. Hoisted to a
@@ -211,6 +270,12 @@ async function extractMalaccaPdf(file, onProgress) {
   let styleNumber = null;
   let coverInfo = null;
   let coverImage = null;
+  // Column boundaries derived from the table's own header row (see
+  // deriveMalaccaColumnBoundaries) — persists across pages since some
+  // tech packs only print the header once, on the table's first page.
+  let columnBoundaries = null;
+  let headerCollecting = false;
+  let headerItemsBuf = [];
 
   function blankCols() {
     return { placement: '', componentName: '', materialType: '', material: '',
@@ -260,7 +325,7 @@ async function extractMalaccaPdf(file, onProgress) {
     isBomPage = MALACCA_BOM_PAGE_RE.test(topLabel);
     if (!isBomPage) continue;
     if (!styleNumber) {
-      const sm = topLabel.match(/BOM_(\d+)/);
+      const sm = topLabel.match(/BOM_(\d+)/i);
       if (sm) styleNumber = sm[1];
     }
 
@@ -289,9 +354,30 @@ async function extractMalaccaPdf(file, onProgress) {
         currentSection = `${m[1]} - ${m[2]}`;
         continue;
       }
-      // 3 header lines per section: main header row, its continuation
-      // fragments, and the 3rd-line "Color" wrap for Cuttable Width-Color
-      if (line.items[0] && line.items[0].text === 'Placement' && line.items[0].x < 30) continue;
+      // The header row's column labels wrap across 2-3 physical lines
+      // (main row, continuation fragments, and a 3rd "Color" wrap for
+      // Cuttable Width-Color) — and the *set* of columns varies between
+      // tech packs (some add a 2nd colorway, Finish, Price). Collect every
+      // line from "Placement" up until a line that actually looks like a
+      // data row, then derive this table's column boundaries from those
+      // collected header fragments instead of assuming a fixed layout.
+      if (line.items[0] && line.items[0].text === 'Placement' && line.items[0].x < 30) {
+        headerCollecting = true;
+        headerItemsBuf = [...line.items];
+        continue;
+      }
+      if (headerCollecting) {
+        const looksLikeData = line.items.some(it => MALACCA_CONSUMPTION_RE.test(it.text) || /^\d{2,}/.test(it.text));
+        if (!looksLikeData && headerItemsBuf.length < 80) {
+          headerItemsBuf.push(...line.items);
+          continue;
+        }
+        headerCollecting = false;
+        columnBoundaries = deriveMalaccaColumnBoundaries(headerItemsBuf) || MALACCA_COLUMNS_FALLBACK;
+      }
+      // Defensive fallback for the rare case a header fragment line slips
+      // through the collection above (e.g. header collection never
+      // triggered on this page for some reason).
       if (line.items.length <= 4 && line.items.every(t => MALACCA_HEADER_FRAG_TOKENS.has(t.text))) continue;
       if (lineText === 'Color' && line.items[0].x > 670) continue;
 
@@ -299,7 +385,7 @@ async function extractMalaccaPdf(file, onProgress) {
 
       const cols = blankCols();
       for (const it of line.items) {
-        const key = classifyMalaccaColumn(it.x);
+        const key = classifyMalaccaColumn(it.x, columnBoundaries);
         cols[key] = (cols[key] ? cols[key] + ' ' : '') + it.text;
       }
 
