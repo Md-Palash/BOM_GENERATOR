@@ -193,53 +193,78 @@ function extractMalaccaCoverInfo(items) {
   return { style, brand, age, productionManager };
 }
 
-// Renders page 1 to a canvas (pdf.js correctly applies the page's rotation
-// when rendering, so this is always in normal reading orientation), crops
-// a generous top-right region, then auto-trims that crop down to its
-// actual non-white content — i.e. whatever picture sits in the top-right
-// corner of the cover page, regardless of its exact position/size.
+// Locates the picture in the top-right corner of page 1 by reading the
+// PDF's own drawing instructions — which image XObject is painted, and
+// under what transform — rather than guessing a crop region on the
+// rendered canvas. A guessed region can't distinguish the actual picture
+// from stray table border lines or text tails that happen to fall inside
+// it, and a fixed percentage doesn't hold across tech packs where the
+// image's own size/position varies. Walking the operator list and
+// tracking the CTM gives the image's exact placement, so the crop is
+// pixel-exact regardless of layout differences between tech packs.
 async function extractMalaccaCoverImage(page, viewport) {
+  const OPS = pdfjsLib.OPS;
+  const { fnArray, argsArray } = await page.getOperatorList();
+
+  let ctm = [1, 0, 0, 1, 0, 0];
+  const stack = [];
+  const placed = [];
+  for (let i = 0; i < fnArray.length; i++) {
+    const fn = fnArray[i];
+    if (fn === OPS.save) {
+      stack.push(ctm);
+    } else if (fn === OPS.restore) {
+      ctm = stack.pop() || [1, 0, 0, 1, 0, 0];
+    } else if (fn === OPS.transform) {
+      // Prepend this delta transform to the current CTM (standard PDF
+      // graphics-state composition for the 'cm' operator).
+      ctm = pdfjsLib.Util.transform(ctm, argsArray[i]);
+    } else if (fn === OPS.paintImageXObject) {
+      // A unit square [0,1]x[0,1] under this CTM, then the page's own
+      // viewport transform, is exactly where this image lands on the
+      // rendered canvas — the same coordinate space used for all the
+      // text-item positions extracted elsewhere in this file.
+      const display = pdfjsLib.Util.transform(viewport.transform, ctm);
+      const corners = [[0, 0], [1, 0], [0, 1], [1, 1]].map(pt => pdfjsLib.Util.applyTransform(pt, display));
+      const xs = corners.map(c => c[0]);
+      const ys = corners.map(c => c[1]);
+      const x0 = Math.min(...xs), x1 = Math.max(...xs);
+      const y0 = Math.min(...ys), y1 = Math.max(...ys);
+      if (x1 - x0 > 15 && y1 - y0 > 15) placed.push({ x0, x1, y0, y1 }); // skip stray tiny artifacts
+    }
+  }
+  if (!placed.length) return null;
+
+  // The cover picture in the top-right corner: among this page's images,
+  // the one furthest right and furthest up (this reliably ranks it above
+  // the top-left brand logo and any larger sketch further down the page,
+  // without depending on any fixed position/size assumptions).
+  placed.sort((a, b) => (b.x0 - b.y0) - (a.x0 - a.y0));
+  const target = placed[0];
+
   const canvas = (typeof OffscreenCanvas !== 'undefined')
     ? new OffscreenCanvas(viewport.width, viewport.height)
     : Object.assign(document.createElement('canvas'), { width: viewport.width, height: viewport.height });
   const ctx = canvas.getContext('2d');
   await page.render({ canvasContext: ctx, viewport }).promise;
 
-  const cropW = Math.round(viewport.width * 0.22);
-  const cropH = Math.round(viewport.height * 0.16);
-  const cropX = viewport.width - cropW;
-  const cropY = 0;
-  const imgData = ctx.getImageData(cropX, cropY, cropW, cropH);
-  const { data, width, height } = imgData;
+  const x0 = Math.max(0, Math.floor(target.x0));
+  const y0 = Math.max(0, Math.floor(target.y0));
+  const w = Math.min(viewport.width - x0, Math.ceil(target.x1 - target.x0));
+  const h = Math.min(viewport.height - y0, Math.ceil(target.y1 - target.y0));
+  if (w <= 0 || h <= 0) return null;
 
-  const WHITE_THRESHOLD = 250;
-  let minX = width, minY = height, maxX = -1, maxY = -1;
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const i = (y * width + x) * 4;
-      const isWhite = data[i] >= WHITE_THRESHOLD && data[i + 1] >= WHITE_THRESHOLD && data[i + 2] >= WHITE_THRESHOLD;
-      if (!isWhite) {
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
-      }
-    }
-  }
-  if (maxX < minX || maxY < minY) return null; // nothing but white found
-
-  const outW = maxX - minX + 1;
-  const outH = maxY - minY + 1;
+  const imgData = ctx.getImageData(x0, y0, w, h);
   const outCanvas = (typeof OffscreenCanvas !== 'undefined')
-    ? new OffscreenCanvas(outW, outH)
-    : Object.assign(document.createElement('canvas'), { width: outW, height: outH });
+    ? new OffscreenCanvas(w, h)
+    : Object.assign(document.createElement('canvas'), { width: w, height: h });
   const outCtx = outCanvas.getContext('2d');
-  outCtx.putImageData(imgData, -minX, -minY, minX, minY, outW, outH);
+  outCtx.putImageData(imgData, 0, 0);
 
   const blob = outCanvas.convertToBlob
     ? await outCanvas.convertToBlob({ type: 'image/png' })
     : await new Promise(res => outCanvas.toBlob(res, 'image/png'));
-  return { buffer: await blob.arrayBuffer(), width: outW, height: outH };
+  return { buffer: await blob.arrayBuffer(), width: w, height: h };
 }
 // Every BOM page's fixed top-left label contains "BOM_" (e.g.
 // "001 : BOM_154969_Tianyi_AW28 -- BOM: Colorway - Material Color") — every
@@ -329,7 +354,12 @@ async function extractMalaccaPdf(file, onProgress) {
       if (sm) styleNumber = sm[1];
     }
 
-    const content_items = items.filter(it => it.y > 90 && it.y < 585);
+    // 'Destination:' is part of the fixed header block repeated on every
+    // page. Its y-position drifts depending on how many lines the other
+    // header fields (e.g. Production Manager) wrap onto, so it can
+    // occasionally land past the y>90 content cutoff below and leak into
+    // a row's description — exclude it explicitly rather than by position.
+    const content_items = items.filter(it => it.y > 90 && it.y < 585 && it.text !== 'Destination:');
     content_items.sort((a, b) => a.y - b.y || a.x - b.x);
     // content_items is sorted ascending by y, so once an item's y moves
     // past the last line's tolerance band it can never match an earlier
@@ -575,6 +605,9 @@ async function buildMalaccaCBD(templateArrayBuffer, sections, styleNumber, cover
       ws.getCell(r, 6).value = 'USD';                           // F - MS Currency
       ws.getCell(r, 12).value = malaccaParseNum(item.consumption); // L - Consumption
       ws.getCell(r, 13).value = item.articleUOM || '';          // M - Article UOM
+      // N - LOSS % (wastage): 10% for thread items, 3% for everything else
+      const isThread = /thread/i.test(item.materialType || '') || /thread/i.test(item.componentName || '') || /thread/i.test(item.material || '');
+      ws.getCell(r, 14).value = isThread ? 0.10 : 0.03;
       if (cfg.hasSize) ws.getCell(r, 29).value = item.size || ''; // AC - Size
       ws.getCell(r, 31).value = 'Yes';                          // AE - Include in PP?
     });
