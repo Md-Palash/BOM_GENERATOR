@@ -16,25 +16,26 @@ const SECTIONS = {
     fields: ['Internal Code','Dev Code','Mill / Vendor Ref no','Mill / Vendor','Name','Content','Construction','Weight','Width','Finish','Coated'],
     terminator: 'COLORWAYS',
     outputCount: 11,
-    dedupeKeyFields: ['Name'],
   },
   'Trim': {
     fields: ['Internal Code','Dev Code','Vendor Ref no','Vendor','Name','Type','Size','Quantity','Special Instructions','Location/Placement','Size scale'],
     terminator: 'COLORWAYS',
     outputCount: 7,
     typeField: 'Type',
-    dedupeKeyFields: ['Type','Location/Placement'],
   },
   'Labels & packaging': {
     fields: ['Internal Code','Dev Code','Vendor Ref no','Vendor','Name','Type','Art Page','Placement','Variable','Quantity','Special instructions','Size scale'],
     terminator: 'COLORWAYS',
     outputCount: 6,
     typeField: 'Type',
-    dedupeKeyFields: ['Type','Placement'],
   },
 };
 
 function norm(s){ return s.replace(/\s+/g,' ').trim().toLowerCase(); }
+// Same as norm(), but also collapses "XS - XL" / "XS-XL" spacing
+// differences so a page-1 size label and an item's own Size-scale text
+// compare equal regardless of how the dash was spaced in the source PDF.
+function normSize(s){ return norm(s || '').replace(/\s*-\s*/g, '-'); }
 
 function nearestAnchor(x, anchors){
   let best = 0, bestDist = Infinity;
@@ -114,10 +115,27 @@ function extractFromPageItems(items, pageNum){
     cols[ci][best].push(it);
   }
 
+  // Column header/title text (e.g. "1  CF ZIPPER TEETH") sits directly
+  // above the field-value grid, below the page's own title band (maxY-40,
+  // same threshold already used above to isolate the page title). Some
+  // columns' header carries a "CANADA" region qualifier that isn't part of
+  // any extracted field value - capture it here so it can be filtered out
+  // later without touching any of the existing field-parsing logic.
+  const headerTokens = items.filter(it => it.y > boundaries[0] && it.y < maxY - 40 && Math.abs(it.x - labelX) > 12);
+  const headerCols = Array.from({length:numCols}, ()=>[]);
+  headerTokens.forEach(it => { headerCols[nearestAnchor(it.x, anchors)].push(it); });
+  const columnHeaders = headerCols.map(tokens=>{
+    const byY = {};
+    tokens.forEach(t=>{ const key = Math.round(t.y/3)*3; (byY[key]=byY[key]||[]).push(t); });
+    return Object.keys(byY).map(Number).sort((a,b)=>b-a)
+      .map(y => byY[y].sort((a,b)=>a.x-b.x).map(t=>t.str.trim()).join(' '))
+      .join(' ').trim();
+  });
+
   const results = [];
-  const { typeField, dedupeKeyFields } = SECTIONS[sectionKey];
+  const { typeField } = SECTIONS[sectionKey];
   const typeIdx = typeField ? fields.indexOf(typeField) : -1;
-  const keyIdxs = (dedupeKeyFields || []).map(f => fields.indexOf(f)).filter(i => i >= 0);
+  const sizeScaleIdx = fields.indexOf('Size scale');
 
   for (let c=0;c<numCols;c++){
     const fieldTexts = cols[c].map(tokens=>{
@@ -147,12 +165,10 @@ function extractFromPageItems(items, pageNum){
     }
 
     const typeVal = typeIdx >= 0 ? fieldTexts[typeIdx] : '';
-    const groupKey = keyIdxs.map(i => norm(fieldTexts[i])).join('|');
     let unit;
     if (sectionKey === 'Fabric') unit = 'YDS';
     else if (/elastic/i.test(typeVal)) unit = 'YDS';
     else unit = 'PCS'; // Trim, Labels & packaging, Print/Heat Transfer/Embroidery default
-    const allFieldsText = fieldTexts.join(' ');
 
     // drop thread items in the Trim section entirely
     if (sectionKey === 'Trim' && norm(typeVal) === 'thread') continue;
@@ -166,39 +182,34 @@ function extractFromPageItems(items, pageNum){
       unit: unit,
       extractedInfo: fieldTexts.slice(0, outputCount).filter(v=>v).join(' '),
       _type: typeVal,
-      _groupKey: groupKey,
-      _allFieldsText: allFieldsText,
       _name: fieldTexts[nameIdx] || '',
+      // Which size tier(s) this item applies to (e.g. "BIG GIRLS ALPHA
+      // (XS - XL)" + "TODDLER" stacked) - empty for Fabric, where the field
+      // doesn't exist, and for any item whose Size scale couldn't be read.
+      _sizeScale: sizeScaleIdx >= 0 ? (fieldTexts[sizeScaleIdx] || '') : '',
+      // Raw column-header text, kept only long enough to check for a
+      // "CANADA" region qualifier; stripped before results are returned.
+      _columnHeader: columnHeaders[c] || '',
     });
   }
   return results;
 }
 
-// Groups items that represent the same conceptual trim/label component
-// repeated across different size ranges (same Type + same Placement text),
-// keeping only the variant meant for BIG BOYS / BIG GIRL sizing.
-function dedupeSizeVariants(results){
-  const groups = new Map();
-  const order = [];
-  for (const r of results){
-    if (!r._groupKey){ order.push({ single: r }); continue; }
-    const key = r.section + '|' + r._groupKey;
-    if (!groups.has(key)){ const arr=[]; groups.set(key, arr); order.push({ key, arr }); }
-    groups.get(key).push(r);
-  }
-  const out = [];
-  for (const entry of order){
-    if (entry.single){ out.push(entry.single); continue; }
-    const arr = entry.arr;
-    if (arr.length === 1){ out.push(arr[0]); continue; }
-    const bigBoys = arr.find(r => /big boys|big girl/i.test(r._allFieldsText));
-    out.push(bigBoys || arr[0]);
-  }
-  return out;
+// Drops any item whose column header calls out a Canada-only region (e.g.
+// a "... - CANADA" variant column) - its global counterpart, which exists
+// as its own separate column without that qualifier, is kept instead.
+function filterCanadaItems(results){
+  return results.filter(r => !/canada/i.test(r._columnHeader || ''));
 }
 
 // Merges separate zipper component rows (tape / teeth / puller-slider) that
-// belong to the same zipper into a single combined row.
+// belong to the same zipper into one combined row per size grouping. Parts
+// are usually identical across every size tier (one teeth column, one tape
+// column, etc. shared by all sizes); when a part instead has its own
+// column per size tier, that's visible the same way as everywhere else -
+// via that part's own Size scale field - so this now produces one combined
+// row per distinct grouping found among the parts, instead of keeping only
+// the "biggest size" grouping and discarding the rest.
 function mergeZipperItems(results){
   const ZIPPER_RE = /zipper|zip\b/i;
   const TEETH_RE = /teeth|chain/i;
@@ -206,11 +217,14 @@ function mergeZipperItems(results){
   const TAPE_RE = /tape/i;
   const PART_RE = /tape|teeth|chain|puller|slider|pull(?:\s|-)?tab/i;
 
-  function pickBest(bucket){
+  // A bucket with just one part is shared by every size grouping, exactly
+  // as before. A bucket with several parts picks the one whose own Size
+  // scale matches this particular grouping (falls back to the first part
+  // if none match exactly).
+  function pickForGroup(bucket, key){
     if (bucket.length === 0) return null;
     if (bucket.length === 1) return bucket[0];
-    const bigBoys = bucket.find(r => /big boys|big girl/i.test(r._allFieldsText));
-    return bigBoys || bucket[0]; // tie / no size match -> first occurring
+    return bucket.find(it => normSize(it._sizeScale) === key) || bucket[0];
   }
 
   const out = [];
@@ -232,21 +246,33 @@ function mergeZipperItems(results){
         const sliderBucket = group.filter(g => SLIDER_RE.test(g._type) || SLIDER_RE.test(g._name));
         const tapeBucket = group.filter(g => TAPE_RE.test(g._type) || TAPE_RE.test(g._name));
         const leftover = group.filter(g => !teethBucket.includes(g) && !sliderBucket.includes(g) && !tapeBucket.includes(g));
+        const allBuckets = [teethBucket, sliderBucket, tapeBucket, leftover];
 
-        const chosen = [pickBest(teethBucket), pickBest(sliderBucket), pickBest(tapeBucket)]
-          .filter(Boolean)
-          .concat(leftover); // anything unclassified still gets included, just not size-filtered
+        // Only a bucket that actually has more than one part can express a
+        // real size split; a lone shared part shouldn't manufacture an
+        // extra grouping just because its own Size scale happens to differ
+        // in wording from another bucket's.
+        const splitBuckets = allBuckets.filter(b => b.length > 1);
+        const groupKeys = splitBuckets.length
+          ? [...new Set(splitBuckets.flatMap(b => b.map(it => normSize(it._sizeScale))))]
+          : [normSize(r._sizeScale)];
 
-        out.push({
-          section: r.section,
-          page: r.page,
-          itemName: chosen.map(g=>g.itemName).filter(Boolean).join(' + '),
-          internalCode: chosen.map(g=>g.internalCode).filter(Boolean).join(' + '),
-          supplier: chosen.map(g=>g.supplier).filter(Boolean).join(' + '),
-          unit: 'PCS',
-          extractedInfo: chosen.map(g=>g.extractedInfo).filter(Boolean).join(' + '),
-          _type: 'ZIPPER', _groupKey: r._groupKey, _allFieldsText: r._allFieldsText, _name: r._name,
-        });
+        for (const key of groupKeys){
+          const chosen = allBuckets.map(bucket => pickForGroup(bucket, key)).filter(Boolean);
+          if (chosen.length === 0) continue;
+          out.push({
+            section: r.section,
+            page: r.page,
+            itemName: chosen.map(g=>g.itemName).filter(Boolean).join(' + '),
+            internalCode: chosen.map(g=>g.internalCode).filter(Boolean).join(' + '),
+            supplier: chosen.map(g=>g.supplier).filter(Boolean).join(' + '),
+            unit: 'PCS',
+            extractedInfo: chosen.map(g=>g.extractedInfo).filter(Boolean).join(' + '),
+            _type: 'ZIPPER', _name: r._name,
+            _sizeScale: key,
+            _columnHeader: chosen.map(g=>g._columnHeader).filter(Boolean).join(' '),
+          });
+        }
         i = j;
         continue;
       }
@@ -258,7 +284,9 @@ function mergeZipperItems(results){
 }
 
 function stripInternalFields(results){
-  return results.map(({ _type, _groupKey, _allFieldsText, _name, ...rest }) => rest);
+  // _sizeScale is intentionally kept - mergeIntoCostBreakDown uses it to
+  // route each item into the correct size tab(s).
+  return results.map(({ _type, _name, _columnHeader, ...rest }) => rest);
 }
 
 // Fixed placement (in PDF points, page 1) of the product sketch image in
@@ -300,6 +328,19 @@ async function extractProductImage(pdfDoc){
   }
 }
 
+// Turns a full page-1 size label into the short token used in a Cost Break
+// Down tab name, e.g.:
+//   "BIG GIRLS ALPHA (XS - XL)" -> "XS-XL"   (parenthetical range)
+//   "GIRLS 4-6X"                -> "4-6X"    (trailing size code)
+//   "TODDLER"                   -> "TODDLER" (single word, used as-is)
+function shortenSizeLabel(label){
+  const paren = label.match(/\(([^)]+)\)/);
+  if (paren) return paren[1].replace(/\s*-\s*/g, '-').trim();
+  const tokens = label.trim().split(/\s+/);
+  if (tokens.length > 1) return tokens[tokens.length - 1];
+  return label.trim();
+}
+
 function extractHeaderInfo(items){
   const maxSize = Math.max(...items.map(it => it.size || 0));
   const styleTokens = items.filter(it => Math.abs((it.size||0) - maxSize) < 0.5 && it.y > 500)
@@ -328,19 +369,13 @@ function extractHeaderInfo(items){
       .map(it => it.str.trim())
       .filter(Boolean);
   }
-  function sizeTier(label){ if (/toddler/i.test(label) || /\d+t\b/i.test(label)) return 0; return 1; }
-  function maxNumber(label){ const nums = (label.match(/\d+/g)||[]).map(Number); return nums.length ? Math.max(...nums) : 0; }
-  let biggestSize = '';
-  if (sizeCandidates.length){
-    biggestSize = sizeCandidates.reduce((best, cur) => {
-      const bt = sizeTier(best), ct = sizeTier(cur);
-      if (ct > bt) return cur;
-      if (ct === bt && maxNumber(cur) > maxNumber(best)) return cur;
-      return best;
-    });
-  }
 
-  return { buyer: 'HADDAD', style, item: itemName, size: biggestSize };
+  // Every size candidate is kept - previously only the single "biggest"
+  // tier survived and the rest were discarded. One Cost Break Down tab is
+  // generated per candidate found here.
+  const sizes = sizeCandidates.map(label => ({ label, token: shortenSizeLabel(label) }));
+
+  return { buyer: 'HADDAD', style, item: itemName, sizes };
 }
 
 async function extractPdf(file, onProgress){
@@ -359,7 +394,7 @@ async function extractPdf(file, onProgress){
     const res = extractFromPageItems(items, p);
     if (res) all = all.concat(res);
   }
-  all = dedupeSizeVariants(all);
+  all = filterCanadaItems(all);
   all = mergeZipperItems(all);
   const productImage = await extractProductImage(doc);
   return { items: stripInternalFields(all), productImage, headerInfo };
@@ -592,6 +627,60 @@ function matchFabricPrice(item){
   return null;
 }
 
+// Excel sheet names: <=31 chars, no \ / ? * [ ] : , can't start/end with '.
+function sanitizeSheetName(name){
+  let n = (name || 'Sheet').replace(/[\\/?*\[\]:]/g, '-').replace(/^'+|'+$/g, '').trim();
+  if (n.length > 31) n = n.slice(0, 31).trim();
+  return n || 'Sheet';
+}
+
+// True if this item belongs on the tab for sizeLabel. An item with no
+// Size-scale text at all (extraction miss, or a section like Fabric that
+// doesn't carry the field) is included on every tab rather than dropped.
+function itemAppliesToSize(item, sizeLabel){
+  if (!item._sizeScale) return true;
+  return normSize(item._sizeScale).includes(normSize(sizeLabel));
+}
+
+// Full manual worksheet clone (values/formulas, styles, merges, data
+// validations, view settings) - ExcelJS doesn't carry any of this over
+// automatically. Used to produce one tab per discovered size from the
+// single master "Format" layout in the template.
+function cloneWorksheetInto(workbook, sourceWs, newName, maxCol = 22){
+  const maxRow = sourceWs.rowCount;
+  const newWs = workbook.addWorksheet(newName);
+
+  for (let c = 1; c <= maxCol; c++){
+    const srcCol = sourceWs.getColumn(c);
+    const dstCol = newWs.getColumn(c);
+    if (srcCol.width) dstCol.width = srcCol.width;
+    if (srcCol.hidden) dstCol.hidden = srcCol.hidden;
+  }
+
+  for (let r = 1; r <= maxRow; r++){
+    const srcRow = sourceWs.getRow(r);
+    const dstRow = newWs.getRow(r);
+    if (srcRow.height) dstRow.height = srcRow.height;
+    for (let c = 1; c <= maxCol; c++){
+      const srcCell = srcRow.getCell(c);
+      const dstCell = dstRow.getCell(c);
+      const f = getFormula(srcCell);
+      if (f) dstCell.value = { formula: f };
+      else if (srcCell.value !== null && srcCell.value !== undefined) dstCell.value = srcCell.value;
+      if (srcCell.style) dstCell.style = JSON.parse(JSON.stringify(srcCell.style));
+      if (srcCell.dataValidation) dstCell.dataValidation = JSON.parse(JSON.stringify(srcCell.dataValidation));
+    }
+  }
+
+  const merges = sourceWs.model.merges || [];
+  merges.forEach(rangeStr => { try { newWs.mergeCells(rangeStr); } catch (e) {} });
+
+  if (sourceWs.views) newWs.views = JSON.parse(JSON.stringify(sourceWs.views));
+  if (sourceWs.pageSetup) newWs.pageSetup = JSON.parse(JSON.stringify(sourceWs.pageSetup));
+
+  return newWs;
+}
+
 async function mergeIntoCostBreakDown(templateArrayBuffer, extractedItems, productImage, headerInfo) {
   const isInterfacing = r => /interfacing/i.test(r.itemName || '');
 
@@ -599,47 +688,85 @@ async function mergeIntoCostBreakDown(templateArrayBuffer, extractedItems, produ
     ...extractedItems.filter(r => r.section === 'Trim'),
     ...extractedItems.filter(r => r.section === 'Labels & packaging'),
   ];
+  // Fabric (and interfacing, wherever it's routed from) stays identical on
+  // every tab regardless of its own Size scale value - only the remaining
+  // Trim/Labels accessory items get filtered per tab.
   const fabricItems = [
     ...extractedItems.filter(r => r.section === 'Fabric'),
     ...trimAndLabels.filter(isInterfacing),
   ];
   const printItems = extractedItems.filter(r => r.section.toLowerCase().startsWith('print'));
-  const accessoryItems = trimAndLabels.filter(r => !isInterfacing(r));
+  const accessoryItemsAll = trimAndLabels.filter(r => !isInterfacing(r));
 
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(templateArrayBuffer);
-  const ws = workbook.getWorksheet('Format');
-  let maxRow = ws.rowCount;
-  normalizeFormulas(ws, maxRow);
+  const masterWs = workbook.getWorksheet('Format');
 
-  if (headerInfo){
-    if (headerInfo.buyer) ws.getCell('B5').value = headerInfo.buyer;
-    if (headerInfo.style) ws.getCell('B6').value = headerInfo.style;
-    if (headerInfo.size) ws.getCell('B7').value = headerInfo.size;
-    if (headerInfo.item) ws.getCell('B8').value = headerInfo.item;
-  }
+  // Fall back to a single unlabeled tab (today's old single-sheet
+  // behavior) if page 1 didn't yield any size candidates at all.
+  const sizes = (headerInfo && headerInfo.sizes && headerInfo.sizes.length)
+    ? headerInfo.sizes
+    : [{ label: '', token: '' }];
 
-  const cfgAcc = { ...SECTION_CONFIG.Accessories, extraCols: [{ col: 9, compute: () => '1.05' }] };
-  ({ maxSheetRow: maxRow } = fillSection(ws, cfgAcc, accessoryItems, maxRow));
+  // The product image buffer only needs to be registered with the
+  // workbook once; the same image id can be placed on every tab.
+  const imgId = (productImage && productImage.buffer)
+    ? workbook.addImage({ buffer: productImage.buffer, extension: 'png' })
+    : null;
 
-  const cfgPrint = { ...SECTION_CONFIG.Print };
-  ({ maxSheetRow: maxRow } = fillSection(ws, cfgPrint, printItems, maxRow));
+  const usedNames = new Set();
+  const counts = [];
 
-  const cfgFab = { ...SECTION_CONFIG.Fabric, extraCols: [{ col: 12, compute: matchFabricPrice }] };
-  ({ maxSheetRow: maxRow } = fillSection(ws, cfgFab, fabricItems, maxRow));
+  for (let s = 0; s < sizes.length; s++){
+    const { label: sizeLabel, token } = sizes[s];
+    const rawName = headerInfo && headerInfo.style
+      ? `${headerInfo.style} (${token || sizeLabel || (s + 1)})`
+      : (token || sizeLabel || `Sheet${s + 1}`);
+    let tabName = sanitizeSheetName(rawName);
+    let n = 1;
+    while (usedNames.has(tabName)) tabName = sanitizeSheetName(`${rawName} ${++n}`);
+    usedNames.add(tabName);
 
-  if (productImage && productImage.buffer) {
-    const imgId = workbook.addImage({ buffer: productImage.buffer, extension: 'png' });
-    const displayWidth = 320;
-    const displayHeight = Math.round(displayWidth * (productImage.height / productImage.width));
-    ws.addImage(imgId, {
-      tl: { col: 17, row: 0 },
-      ext: { width: displayWidth, height: displayHeight },
-    });
+    // First size reuses (renames) the master sheet in place; every
+    // additional size gets a full manual clone of its layout.
+    const ws = s === 0 ? masterWs : cloneWorksheetInto(workbook, masterWs, tabName);
+    if (s === 0) ws.name = tabName;
+
+    let maxRow = ws.rowCount;
+    normalizeFormulas(ws, maxRow, 22);
+
+    if (headerInfo){
+      if (headerInfo.buyer) ws.getCell('B5').value = headerInfo.buyer;
+      if (headerInfo.style) ws.getCell('B6').value = headerInfo.style;
+      if (sizeLabel) ws.getCell('B7').value = sizeLabel;
+      if (headerInfo.item) ws.getCell('B8').value = headerInfo.item;
+    }
+
+    const accessoryItems = accessoryItemsAll.filter(r => itemAppliesToSize(r, sizeLabel));
+
+    const cfgAcc = { ...SECTION_CONFIG.Accessories, extraCols: [{ col: 9, compute: () => '1.05' }] };
+    ({ maxSheetRow: maxRow } = fillSection(ws, cfgAcc, accessoryItems, maxRow));
+
+    const cfgPrint = { ...SECTION_CONFIG.Print };
+    ({ maxSheetRow: maxRow } = fillSection(ws, cfgPrint, printItems, maxRow));
+
+    const cfgFab = { ...SECTION_CONFIG.Fabric, extraCols: [{ col: 12, compute: matchFabricPrice }] };
+    ({ maxSheetRow: maxRow } = fillSection(ws, cfgFab, fabricItems, maxRow));
+
+    if (imgId !== null) {
+      const displayWidth = 320;
+      const displayHeight = Math.round(displayWidth * (productImage.height / productImage.width));
+      ws.addImage(imgId, {
+        tl: { col: 17, row: 0 },
+        ext: { width: displayWidth, height: displayHeight },
+      });
+    }
+
+    counts.push({ tab: tabName, fabric: fabricItems.length, print: printItems.length, accessories: accessoryItems.length });
   }
 
   const buffer = await workbook.xlsx.writeBuffer();
-  return { buffer, counts: { fabric: fabricItems.length, print: printItems.length, accessories: accessoryItems.length } };
+  return { buffer, counts };
 }
 
 
@@ -889,7 +1016,10 @@ cbdBtn.addEventListener('click', async ()=>{
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-    cbdStatus.textContent = `Done — Fabric: ${counts.fabric}, Print/Heat Transfer/Embroidery: ${counts.print}, Accessories (Trim + Labels & Packaging): ${counts.accessories}.`;
+    const tabSummary = counts.map(c =>
+      `${c.tab} — Fabric: ${c.fabric}, Print/Heat Transfer/Embroidery: ${c.print}, Accessories: ${c.accessories}`
+    ).join(' | ');
+    cbdStatus.textContent = `Done — ${counts.length} size tab${counts.length === 1 ? '' : 's'} generated. ${tabSummary}.`;
     cbdStatus.className = 'status ok';
   } catch(err){
     console.error(err);
