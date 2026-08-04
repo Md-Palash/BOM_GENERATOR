@@ -85,7 +85,12 @@ function deriveMalaccaColumnBoundaries(headerItems) {
   present.sort((a, b) => a[1] - b[1]);
   return present.map(([key, x], i) => ({
     key,
-    max: i + 1 < present.length ? (x + present[i + 1][1]) / 2 : Infinity,
+    // Biased toward the next anchor (60% of the gap) rather than a strict
+    // midpoint: column labels are short and left-aligned, but the actual
+    // data (e.g. a long Placement description) can run wider than the
+    // label alone suggests. A strict midpoint risks classifying the tail
+    // of a long value into the next column.
+    max: i + 1 < present.length ? x + (present[i + 1][1] - x) * 0.6 : Infinity,
   }));
 }
 
@@ -193,79 +198,6 @@ function extractMalaccaCoverInfo(items) {
   return { style, brand, age, productionManager };
 }
 
-// Locates the picture in the top-right corner of page 1 by reading the
-// PDF's own drawing instructions — which image XObject is painted, and
-// under what transform — rather than guessing a crop region on the
-// rendered canvas. A guessed region can't distinguish the actual picture
-// from stray table border lines or text tails that happen to fall inside
-// it, and a fixed percentage doesn't hold across tech packs where the
-// image's own size/position varies. Walking the operator list and
-// tracking the CTM gives the image's exact placement, so the crop is
-// pixel-exact regardless of layout differences between tech packs.
-async function extractMalaccaCoverImage(page, viewport) {
-  const OPS = pdfjsLib.OPS;
-  const { fnArray, argsArray } = await page.getOperatorList();
-
-  let ctm = [1, 0, 0, 1, 0, 0];
-  const stack = [];
-  const placed = [];
-  for (let i = 0; i < fnArray.length; i++) {
-    const fn = fnArray[i];
-    if (fn === OPS.save) {
-      stack.push(ctm);
-    } else if (fn === OPS.restore) {
-      ctm = stack.pop() || [1, 0, 0, 1, 0, 0];
-    } else if (fn === OPS.transform) {
-      // Prepend this delta transform to the current CTM (standard PDF
-      // graphics-state composition for the 'cm' operator).
-      ctm = pdfjsLib.Util.transform(ctm, argsArray[i]);
-    } else if (fn === OPS.paintImageXObject) {
-      // A unit square [0,1]x[0,1] under this CTM, then the page's own
-      // viewport transform, is exactly where this image lands on the
-      // rendered canvas — the same coordinate space used for all the
-      // text-item positions extracted elsewhere in this file.
-      const display = pdfjsLib.Util.transform(viewport.transform, ctm);
-      const corners = [[0, 0], [1, 0], [0, 1], [1, 1]].map(pt => pdfjsLib.Util.applyTransform(pt, display));
-      const xs = corners.map(c => c[0]);
-      const ys = corners.map(c => c[1]);
-      const x0 = Math.min(...xs), x1 = Math.max(...xs);
-      const y0 = Math.min(...ys), y1 = Math.max(...ys);
-      if (x1 - x0 > 15 && y1 - y0 > 15) placed.push({ x0, x1, y0, y1 }); // skip stray tiny artifacts
-    }
-  }
-  if (!placed.length) return null;
-
-  // The cover picture in the top-right corner: among this page's images,
-  // the one furthest right and furthest up (this reliably ranks it above
-  // the top-left brand logo and any larger sketch further down the page,
-  // without depending on any fixed position/size assumptions).
-  placed.sort((a, b) => (b.x0 - b.y0) - (a.x0 - a.y0));
-  const target = placed[0];
-
-  const canvas = (typeof OffscreenCanvas !== 'undefined')
-    ? new OffscreenCanvas(viewport.width, viewport.height)
-    : Object.assign(document.createElement('canvas'), { width: viewport.width, height: viewport.height });
-  const ctx = canvas.getContext('2d');
-  await page.render({ canvasContext: ctx, viewport }).promise;
-
-  const x0 = Math.max(0, Math.floor(target.x0));
-  const y0 = Math.max(0, Math.floor(target.y0));
-  const w = Math.min(viewport.width - x0, Math.ceil(target.x1 - target.x0));
-  const h = Math.min(viewport.height - y0, Math.ceil(target.y1 - target.y0));
-  if (w <= 0 || h <= 0) return null;
-
-  const imgData = ctx.getImageData(x0, y0, w, h);
-  const outCanvas = (typeof OffscreenCanvas !== 'undefined')
-    ? new OffscreenCanvas(w, h)
-    : Object.assign(document.createElement('canvas'), { width: w, height: h });
-  const outCtx = outCanvas.getContext('2d');
-  outCtx.putImageData(imgData, 0, 0);
-
-  const blob = outCanvas.convertToBlob
-    ? await outCanvas.convertToBlob({ type: 'image/png' })
-    : await new Promise(res => outCanvas.toBlob(res, 'image/png'));
-  return { buffer: await blob.arrayBuffer(), width: w, height: h };
-}
 // Every BOM page's fixed top-left label contains "BOM_" (e.g.
 // "001 : BOM_154969_Tianyi_AW28 -- BOM: Colorway - Material Color") — every
 // other page type (Cover, Detail Sketch, Graded Measurement, Technical
@@ -294,7 +226,6 @@ async function extractMalaccaPdf(file, onProgress) {
   let isBomPage = false;
   let styleNumber = null;
   let coverInfo = null;
-  let coverImage = null;
   // Column boundaries derived from the table's own header row (see
   // deriveMalaccaColumnBoundaries) — persists across pages since some
   // tech packs only print the header once, on the table's first page.
@@ -333,17 +264,9 @@ async function extractMalaccaPdf(file, onProgress) {
       })
       .filter(it => it.text.trim().length > 0);
 
-    // Page 1 (Cover Page) carries the brand/style/age/PM header info and
-    // the top-right cover picture — extract these regardless of whether
-    // this page also happens to be a BOM page.
+    // Page 1 (Cover Page) carries the brand/style/age/PM header info.
     if (p === 1) {
       coverInfo = extractMalaccaCoverInfo(items);
-      try {
-        coverImage = await extractMalaccaCoverImage(page, viewport);
-      } catch (err) {
-        console.error('Malacca cover image extraction failed:', err);
-        coverImage = null;
-      }
     }
 
     const topLabel = items.filter(it => it.y <= 12).sort((a, b) => a.x - b.x).map(i => i.text).join(' ');
@@ -380,8 +303,15 @@ async function extractMalaccaPdf(file, onProgress) {
 
       const m = lineText.match(MALACCA_SECTION_RE);
       if (m) {
-        flushRow();
-        currentSection = `${m[1]} - ${m[2]}`;
+        const newSection = `${m[1]} - ${m[2]}`;
+        // Some tech packs repeat "Section: X" at the top of a continuation
+        // page when a section's table spans a page break. That's not a
+        // real transition to a new section — don't flush the in-progress
+        // row, since its wrapped continuation may still be coming.
+        if (newSection !== currentSection) {
+          flushRow();
+          currentSection = newSection;
+        }
         continue;
       }
       // The header row's column labels wrap across 2-3 physical lines
@@ -397,7 +327,7 @@ async function extractMalaccaPdf(file, onProgress) {
         continue;
       }
       if (headerCollecting) {
-        const looksLikeData = line.items.some(it => MALACCA_CONSUMPTION_RE.test(it.text) || /^\d{2,}/.test(it.text));
+        const looksLikeData = line.items.some(it => MALACCA_CONSUMPTION_RE.test(it.text));
         if (!looksLikeData && headerItemsBuf.length < 80) {
           headerItemsBuf.push(...line.items);
           continue;
@@ -433,7 +363,7 @@ async function extractMalaccaPdf(file, onProgress) {
   }
   flushRow();
 
-  return { sections, styleNumber, coverInfo, coverImage }; // sections: { '01 - Fabric': [...], '02 - Trims': [...], ... }
+  return { sections, styleNumber, coverInfo }; // sections: { '01 - Fabric': [...], '02 - Trims': [...], ... }
 }
 
 function malaccaLeadingNumber(material) {
@@ -507,7 +437,7 @@ function malaccaParseNum(v) {
   return isNaN(n) ? 0 : n;
 }
 
-async function buildMalaccaCBD(templateArrayBuffer, sections, styleNumber, coverInfo, coverImage) {
+async function buildMalaccaCBD(templateArrayBuffer, sections, styleNumber, coverInfo) {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(templateArrayBuffer.slice(0));
   const ws = workbook.worksheets[0];
@@ -529,28 +459,6 @@ async function buildMalaccaCBD(templateArrayBuffer, sections, styleNumber, cover
     if (coverInfo.style) ws.getCell('B6').value = coverInfo.style;
     if (coverInfo.age) ws.getCell('B8').value = coverInfo.age;
     if (coverInfo.productionManager) ws.getCell('B12').value = coverInfo.productionManager;
-  }
-
-  // Swap the cover picture for the one cropped from the top-right corner
-  // of the tech pack's first page, keeping the same anchor position and
-  // width, and adjusting height to the new image's own aspect ratio so it
-  // isn't stretched/distorted.
-  if (coverImage) {
-    const existing = ws.getImages()[0];
-    const imageId = workbook.addImage({ buffer: coverImage.buffer, extension: 'png' });
-    if (existing) {
-      const { tl, ext, editAs } = existing.range;
-      const newExt = ext
-        ? { width: ext.width, height: ext.width * (coverImage.height / coverImage.width) }
-        : undefined;
-      // getImages() filters the worksheet's internal _media list rather
-      // than owning it, so the old image has to be spliced out of _media
-      // directly before the new one is added.
-      ws._media = ws._media.filter(m => m !== existing);
-      ws.addImage(imageId, { tl, ext: newExt, editAs });
-    } else {
-      ws.addImage(imageId, { tl: { col: 10, row: 9 }, ext: { width: 300, height: 300 * (coverImage.height / coverImage.width) } });
-    }
   }
 
   normalizeFormulas(ws, ws.rowCount, MALACCA_CBD_MAXCOL);
@@ -654,7 +562,6 @@ let currentFileMal = null;
 let currentMalSections = null;
 let currentMalStyleNumber = null;
 let currentMalCoverInfo = null;
-let currentMalCoverImage = null;
 
 function setStatusMal(msg, cls) {
   statusMal.textContent = msg;
@@ -673,7 +580,6 @@ function setFileMal(file) {
   resultsMal.classList.remove('show');
   currentMalSections = null;
   currentMalCoverInfo = null;
-  currentMalCoverImage = null;
   processBtnMal.disabled = false;
 }
 
@@ -693,7 +599,6 @@ clearFileMal.addEventListener('click', e => {
   resultsMal.classList.remove('show');
   currentMalSections = null;
   currentMalCoverInfo = null;
-  currentMalCoverImage = null;
   setStatusMal('');
   processBtnMal.disabled = true;
 });
@@ -716,14 +621,13 @@ processBtnMal.addEventListener('click', async () => {
   processBtnMal.classList.add('loading');
   resultsMal.classList.remove('show');
   try {
-    const { sections, styleNumber, coverInfo, coverImage } = await extractMalaccaPdf(currentFileMal, (p, total) => {
+    const { sections, styleNumber, coverInfo } = await extractMalaccaPdf(currentFileMal, (p, total) => {
       processLabelMal.textContent = `Scanning page ${p} / ${total}...`;
       setStatusMal(`Scanning page ${p} of ${total}...`);
     });
     currentMalSections = sections;
     currentMalStyleNumber = styleNumber || malaccaStyleFromFilename(currentFileMal.name);
     currentMalCoverInfo = coverInfo;
-    currentMalCoverImage = coverImage;
     const total = malaccaItemCount(sections);
     if (total === 0) {
       setStatusMal('No BOM line items were found in this tech pack.', 'err');
@@ -737,7 +641,6 @@ processBtnMal.addEventListener('click', async () => {
     setStatusMal('Something went wrong reading this PDF: ' + err.message, 'err');
     currentMalSections = null;
     currentMalCoverInfo = null;
-    currentMalCoverImage = null;
   } finally {
     processBtnMal.disabled = false;
     processBtnMal.classList.remove('loading');
@@ -759,7 +662,7 @@ cbdBtnMal.addEventListener('click', async () => {
   cbdStatusMal.className = 'status';
   try {
     const templateBuffer = base64ToArrayBuffer(MALACCA_TEMPLATE_B64);
-    const { buffer, counts } = await buildMalaccaCBD(templateBuffer, currentMalSections, currentMalStyleNumber, currentMalCoverInfo, currentMalCoverImage);
+    const { buffer, counts } = await buildMalaccaCBD(templateBuffer, currentMalSections, currentMalStyleNumber, currentMalCoverInfo);
     const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
