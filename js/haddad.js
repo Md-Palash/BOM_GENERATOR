@@ -496,6 +496,30 @@ async function extractPdf(file, onProgress){
   return { items: stripInternalFields(all), productImage, headerInfo };
 }
 
+// Supply Chain Sheet extraction - reuses the same per-column field parsing
+// as extractPdf, but skips the BOM-specific cleanup steps (Canada
+// filtering, zipper-part merging, colorway/group dedup) since the Supply
+// Chain Sheet lists every extracted column as its own row. No product
+// image is needed here either.
+async function extractPdfRaw(file, onProgress){
+  const arrayBuffer = await file.arrayBuffer();
+  const doc = await pdfjsLib.getDocument({data: new Uint8Array(arrayBuffer)}).promise;
+  let all = [];
+  let headerInfo = null;
+  for (let p=1; p<=doc.numPages; p++){
+    onProgress(p, doc.numPages);
+    const page = await doc.getPage(p);
+    const textContent = await page.getTextContent();
+    const items = textContent.items
+      .map(it => ({str: it.str, x: it.transform[4], y: it.transform[5], size: it.transform[0]}))
+      .filter(it => it.str.trim() !== '');
+    if (p === 1) headerInfo = extractHeaderInfo(items);
+    const res = extractFromPageItems(items, p);
+    if (res) all = all.concat(res);
+  }
+  return { items: stripInternalFields(all), headerInfo };
+}
+
 /* ============================================================
    COST BREAK DOWN MERGE ENGINE
    Inserts extracted items into the LVB-PX Cost Break Down Excel
@@ -878,6 +902,46 @@ function cloneWorksheetInto(workbook, sourceWs, newName, maxCol = 22){
   return newWs;
 }
 
+// Builds the Supply Chain Sheet workbook: a plain two-tab file (no
+// template to preserve, unlike the Cost Break Down merge) - Fabric items
+// on one tab, everything else (Trim + Labels & Packaging) on the other.
+// `rows` is a flat list of raw extracted items, each already tagged with
+// its own tech pack's style number under `styleNo`.
+async function buildSupplyChainWorkbook(rows){
+  const workbook = new ExcelJS.Workbook();
+  const fabricWs = workbook.addWorksheet('Fabric');
+  const trimsWs = workbook.addWorksheet('Trims');
+
+  fabricWs.columns = [
+    { header: 'Style No', key: 'style', width: 20 },
+    { header: 'Fabric Code', key: 'code', width: 18 },
+    { header: 'Description', key: 'desc', width: 75 },
+    { header: 'Supplier', key: 'supplier', width: 24 },
+  ];
+  trimsWs.columns = [
+    { header: 'Style No', key: 'style', width: 20 },
+    { header: 'Item name', key: 'name', width: 28 },
+    { header: 'Item code', key: 'code', width: 18 },
+    { header: 'Description', key: 'desc', width: 75 },
+    { header: 'Supplier', key: 'supplier', width: 24 },
+  ];
+  [fabricWs, trimsWs].forEach(ws => {
+    ws.getRow(1).font = { bold: true };
+    ws.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEFF4FF' } };
+    ws.views = [{ state: 'frozen', ySplit: 1 }];
+  });
+
+  rows.forEach(r => {
+    if (r.section === 'Fabric'){
+      fabricWs.addRow({ style: r.styleNo || '', code: r.internalCode || '', desc: r.extractedInfo || '', supplier: r.supplier || '' });
+    } else if (r.section === 'Trim' || r.section === 'Labels & packaging'){
+      trimsWs.addRow({ style: r.styleNo || '', name: r.itemName || '', code: r.internalCode || '', desc: r.extractedInfo || '', supplier: r.supplier || '' });
+    }
+  });
+
+  return await workbook.xlsx.writeBuffer();
+}
+
 async function mergeIntoCostBreakDown(templateArrayBuffer, extractedItems, productImage, headerInfo) {
   const isInterfacing = r => /interfacing/i.test(r.itemName || '');
 
@@ -983,16 +1047,35 @@ async function mergeIntoCostBreakDown(templateArrayBuffer, extractedItems, produ
 
 /* ---- Haddad brand navigation ---- */
 const homeView = document.getElementById('homeView');
+const haddadHubView = document.getElementById('haddadHubView');
 const haddadView = document.getElementById('haddadView');
+const haddadSupplyView = document.getElementById('haddadSupplyView');
+
 document.getElementById('brandHaddad').addEventListener('click', ()=>{
   requestUnlock('haddad', () => {
     homeView.hidden = true;
-    haddadView.hidden = false;
+    haddadHubView.hidden = false;
   });
+});
+document.getElementById('hubBackBtn').addEventListener('click', ()=>{
+  haddadHubView.hidden = true;
+  homeView.hidden = false;
+});
+document.getElementById('hubBomCard').addEventListener('click', ()=>{
+  haddadHubView.hidden = true;
+  haddadView.hidden = false;
+});
+document.getElementById('hubSupplyCard').addEventListener('click', ()=>{
+  haddadHubView.hidden = true;
+  haddadSupplyView.hidden = false;
 });
 document.getElementById('backBtn').addEventListener('click', ()=>{
   haddadView.hidden = true;
-  homeView.hidden = false;
+  haddadHubView.hidden = false;
+});
+document.getElementById('backBtnSupply').addEventListener('click', ()=>{
+  haddadSupplyView.hidden = true;
+  haddadHubView.hidden = false;
 });
 // Decathlon card is a coming-soon placeholder — intentionally not wired up yet.
 
@@ -1240,4 +1323,119 @@ cbdBtn.addEventListener('click', async ()=>{
     cbdBtn.classList.remove('loading');
     cbdLabel.textContent = 'Generate Cost Break Down Excel';
   }
+});
+
+/* ============================================================
+   SUPPLY CHAIN SHEET — multi tech pack, raw Fabric/Trims export
+   ============================================================ */
+const dropzoneSupply = document.getElementById('dropzoneSupply');
+const fileInputSupply = document.getElementById('fileInputSupply');
+const fileListSupply = document.getElementById('fileListSupply');
+const processBtnSupply = document.getElementById('processBtnSupply');
+const processLabelSupply = document.getElementById('processLabelSupply');
+const statusSupply = document.getElementById('statusSupply');
+const resultsSupply = document.getElementById('resultsSupply');
+const countsSupply = document.getElementById('countsSupply');
+const downloadBtnSupply = document.getElementById('downloadBtnSupply');
+
+let currentSupplyFiles = [];
+let currentSupplyBuffer = null;
+
+function setStatusEl(el, msg, cls){
+  el.textContent = msg;
+  el.className = 'status' + (cls ? ' '+cls : '');
+}
+
+function renderSupplyFileList(){
+  fileListSupply.innerHTML = '';
+  currentSupplyFiles.forEach((file, idx) => {
+    const row = document.createElement('div');
+    row.className = 'filebar show';
+    row.style.marginBottom = '8px';
+    row.innerHTML = `
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+      <span class="name">${escapeHtml(file.name)}</span>
+      <span class="clear">✕ remove</span>`;
+    row.querySelector('.clear').addEventListener('click', (e)=>{
+      e.stopPropagation();
+      currentSupplyFiles.splice(idx, 1);
+      renderSupplyFileList();
+    });
+    fileListSupply.appendChild(row);
+  });
+  processBtnSupply.disabled = currentSupplyFiles.length === 0;
+  resultsSupply.classList.remove('show');
+  currentSupplyBuffer = null;
+}
+
+function addSupplyFiles(fileList){
+  const pdfs = Array.from(fileList).filter(f => f.type === 'application/pdf');
+  if (pdfs.length === 0){
+    setStatusEl(statusSupply, 'Please choose PDF file(s).', 'err');
+    return;
+  }
+  currentSupplyFiles = currentSupplyFiles.concat(pdfs);
+  setStatusEl(statusSupply, '');
+  renderSupplyFileList();
+}
+
+dropzoneSupply.addEventListener('dragover', e=>{ e.preventDefault(); dropzoneSupply.classList.add('drag'); });
+dropzoneSupply.addEventListener('dragleave', ()=> dropzoneSupply.classList.remove('drag'));
+dropzoneSupply.addEventListener('drop', e=>{
+  e.preventDefault(); dropzoneSupply.classList.remove('drag');
+  if (e.dataTransfer.files.length) addSupplyFiles(e.dataTransfer.files);
+});
+fileInputSupply.addEventListener('change', e=>{
+  if (e.target.files.length) addSupplyFiles(e.target.files);
+  fileInputSupply.value = ''; // allows re-adding a removed file
+});
+
+processBtnSupply.addEventListener('click', async ()=>{
+  if (currentSupplyFiles.length === 0) return;
+  processBtnSupply.disabled = true;
+  processBtnSupply.classList.add('loading');
+  resultsSupply.classList.remove('show');
+  try {
+    let allRows = [];
+    for (let i = 0; i < currentSupplyFiles.length; i++){
+      const file = currentSupplyFiles[i];
+      processLabelSupply.textContent = `Extracting ${file.name} (${i+1}/${currentSupplyFiles.length})...`;
+      const { items, headerInfo } = await extractPdfRaw(file, (p, total)=>{
+        setStatusEl(statusSupply, `${file.name}: scanning page ${p} of ${total}...`);
+      });
+      const styleNo = (headerInfo && headerInfo.style) ? headerInfo.style : file.name.replace(/\.pdf$/i, '');
+      items.forEach(it => { it.styleNo = styleNo; });
+      allRows = allRows.concat(items);
+    }
+    if (allRows.length === 0){
+      setStatusEl(statusSupply, 'No matching Fabric / Trim / Labels & Packaging grids were found in these PDFs.', 'err');
+    } else {
+      currentSupplyBuffer = await buildSupplyChainWorkbook(allRows);
+      const fabricCount = allRows.filter(r => r.section === 'Fabric').length;
+      const trimsCount = allRows.length - fabricCount;
+      countsSupply.textContent = `Fabric: ${fabricCount} | Trims: ${trimsCount} | Total: ${allRows.length} rows across ${currentSupplyFiles.length} tech pack(s).`;
+      resultsSupply.classList.add('show');
+      setStatusEl(statusSupply, `Done — ${allRows.length} items extracted from ${currentSupplyFiles.length} tech pack(s).`, 'ok');
+    }
+  } catch(err){
+    console.error(err);
+    setStatusEl(statusSupply, 'Something went wrong reading these PDFs: ' + err.message, 'err');
+  } finally {
+    processBtnSupply.disabled = false;
+    processBtnSupply.classList.remove('loading');
+    processLabelSupply.textContent = 'Extract & Generate Supply Chain Sheet';
+  }
+});
+
+downloadBtnSupply.addEventListener('click', ()=>{
+  if (!currentSupplyBuffer) return;
+  const blob = new Blob([currentSupplyBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'Haddad_Supply_Chain_Sheet.xlsx';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 });
