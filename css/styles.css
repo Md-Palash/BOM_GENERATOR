@@ -363,6 +363,25 @@ body{
   padding:4px 9px; border-radius:100px;
 }
 
+/* ---------- HUB — WORKFLOW CHOICE CARDS ---------- */
+.option-grid{
+  display:flex; gap:20px; flex-wrap:wrap;
+}
+.option-card{
+  flex:1; min-width:300px;
+  text-align:left; cursor:pointer;
+  font-family:var(--font);
+  border:1px solid var(--border);
+  transition:transform .22s var(--ease), box-shadow .22s var(--ease), border-color .22s var(--ease);
+}
+.option-card:hover{
+  transform:translateY(-4px);
+  box-shadow:var(--shadow-hover);
+  border-color:var(--accent);
+}
+.option-card:active{ transform:translateY(-1px); }
+.option-card .cbd-head{ margin-bottom:0; }
+
 /* ---------- TOOL VIEW ---------- */
 .tool-view{ opacity:0; animation:fadeUp .4s var(--ease) forwards; }
 .back-btn{
