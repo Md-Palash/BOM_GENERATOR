@@ -144,6 +144,107 @@
     </div>
   </div>
 
+  <!-- ============ HADDAD HUB VIEW ============ -->
+  <div class="tool-view" id="haddadHubView" hidden>
+    <button class="back-btn" id="hubBackBtn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+      Back
+    </button>
+
+    <div class="card hero-card">
+      <div class="hero-top">
+        <div class="hero-copy">
+          <div class="badge"><span class="dot"></span>Haddad Tech Pack Utility</div>
+          <h1>Choose <span class="arrow-glyph">→</span> a Workflow</h1>
+        </div>
+      </div>
+      <p class="lede">Generate a costed BOM from one tech pack, or pull raw Fabric / Trims data from several tech packs at once into a Supply Chain sheet.</p>
+    </div>
+
+    <div class="option-grid">
+      <button class="card cbd-section option-card" id="hubBomCard" type="button">
+        <div class="cbd-head">
+          <div class="icon-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"/><path d="M4 10h16M10 4v16"/></svg>
+          </div>
+          <div>
+            <h2>Generate BOM</h2>
+            <p>Upload one tech pack and build the full Cost Break Down file — one tab per size, formulas and formatting preserved.</p>
+          </div>
+        </div>
+      </button>
+
+      <button class="card cbd-section option-card" id="hubSupplyCard" type="button">
+        <div class="cbd-head">
+          <div class="icon-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M12 15l-4.5-4.5M12 15l4.5-4.5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+          </div>
+          <div>
+            <h2>Generate Supply Chain Sheet</h2>
+            <p>Upload multiple tech packs at once and get one Excel file with every Fabric and Trims/Accessories/Packaging line, tagged by style.</p>
+          </div>
+        </div>
+      </button>
+    </div>
+  </div>
+
+  <!-- ============ HADDAD SUPPLY CHAIN VIEW ============ -->
+  <div class="tool-view" id="haddadSupplyView" hidden>
+    <button class="back-btn" id="backBtnSupply">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+      Back
+    </button>
+
+    <div class="card hero-card">
+      <div class="hero-top">
+        <div class="hero-copy">
+          <div class="badge"><span class="dot"></span>Tech Pack Utility</div>
+          <h1>Multiple TPs <span class="arrow-glyph">→</span> Supply Chain Sheet</h1>
+        </div>
+        <div class="hero-pills">
+          <span class="pill">Supply Chain</span>
+        </div>
+      </div>
+      <p class="lede">Upload as many tech pack PDFs as you like at once. Every Fabric line goes to the Fabric tab; every Trim, Accessory, and Packaging line goes to the Trims tab — each row tagged with its own tech pack's style number.</p>
+    </div>
+
+    <div class="dropzone" id="dropzoneSupply">
+      <input type="file" id="fileInputSupply" accept="application/pdf" multiple>
+      <div class="dz-icon-wrap">
+        <svg class="dz-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M12 15l-4.5-4.5M12 15l4.5-4.5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+      </div>
+      <div class="dz-title">Drop tech pack PDFs here or click to browse</div>
+      <div class="dz-sub">SELECT MULTIPLE FILES AT ONCE — RUNS ENTIRELY IN YOUR BROWSER</div>
+    </div>
+
+    <div id="fileListSupply"></div>
+
+    <button class="btn" id="processBtnSupply" disabled>
+      <svg class="spinner" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"/><path d="M22 12a10 10 0 0 0-10-10" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>
+      <span id="processLabelSupply">Extract &amp; Generate Supply Chain Sheet</span>
+    </button>
+
+    <div class="status" id="statusSupply"></div>
+
+    <div class="results" id="resultsSupply">
+      <div class="card cbd-section">
+        <div class="cbd-head">
+          <div class="icon-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"/><path d="M4 10h16M10 4v16"/></svg>
+          </div>
+          <div>
+            <h2>Supply Chain Sheet</h2>
+            <p id="countsSupply">Two tabs: Fabric (Style No, Fabric Code, Description, Supplier) and Trims (Style No, Item name, Item code, Description, Supplier).</p>
+          </div>
+        </div>
+        <button class="btn secondary" id="downloadBtnSupply" style="margin-top:0;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M12 15l-4.5-4.5M12 15l4.5-4.5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+          Download Supply Chain Sheet (Excel)
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- ============ DECATHLON TOOL VIEW ============ -->
   <div class="tool-view" id="decathlonView" hidden>
     <button class="back-btn" id="backBtnDec">
