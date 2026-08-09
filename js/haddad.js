@@ -744,12 +744,21 @@ const FABRIC_PRICE_RULES = [
 // participates correctly in SUM formulas and any "number format" applied
 // to the column, instead of being stored as text.
 function computeConsumption(item){
-  const q = parseFloat(String(item._quantity || '').replace(/[^0-9.\-]/g, ''));
+  // Quantity should just be a short number like "1" or "2", but a rare
+  // field-boundary overflow (a very long Special Instructions block
+  // bleeding into the next field) can tack extra text - and extra digits -
+  // onto it. Reading only the leading numeric token (where a real
+  // Quantity value always sits) avoids treating stray digits later in the
+  // string as part of the number.
+  const m = String(item._quantity || '').trim().match(/^(\d+(?:\.\d+)?)/);
+  if (!m) return null;
+  const q = parseFloat(m[1]);
   if (!isFinite(q)) return null;
   return Math.round(q * 1.05 * 100) / 100;
 }
 
 function matchFabricPrice(item){
+  if (item._fixedFabricPrice != null) return item._fixedFabricPrice;
   const text = (item.itemName || '') + ' ' + (item.extractedInfo || '');
   for (const rule of FABRIC_PRICE_RULES){
     if (rule.re.test(text)) return rule.price;
@@ -931,11 +940,20 @@ async function buildSupplyChainWorkbook(rows){
     ws.views = [{ state: 'frozen', ySplit: 1 }];
   });
 
+  // A blank row separates one tech pack's block of rows from the next -
+  // tracked independently per sheet, since a style might only produce rows
+  // on one of the two tabs.
+  let lastFabricStyle = null;
+  let lastTrimsStyle = null;
   rows.forEach(r => {
     if (r.section === 'Fabric'){
+      if (lastFabricStyle !== null && r.styleNo !== lastFabricStyle) fabricWs.addRow({});
       fabricWs.addRow({ style: r.styleNo || '', code: r.internalCode || '', desc: r.extractedInfo || '', supplier: r.supplier || '' });
+      lastFabricStyle = r.styleNo;
     } else if (r.section === 'Trim' || r.section === 'Labels & packaging'){
+      if (lastTrimsStyle !== null && r.styleNo !== lastTrimsStyle) trimsWs.addRow({});
       trimsWs.addRow({ style: r.styleNo || '', name: r.itemName || '', code: r.internalCode || '', desc: r.extractedInfo || '', supplier: r.supplier || '' });
+      lastTrimsStyle = r.styleNo;
     }
   });
 
@@ -961,6 +979,15 @@ async function mergeIntoCostBreakDown(templateArrayBuffer, extractedItems, produ
     ...extractedItems.filter(r => r.section === 'Fabric'),
     ...trimAndLabels.filter(isInterfacing),
   ]));
+  // Always-present Fabric line, fixed on every tab regardless of what was
+  // extracted - price is a hardcoded constant (see matchFabricPrice),
+  // not matched against FABRIC_PRICE_RULES like extracted items are.
+  fabricItems.push({
+    section: 'Fabric', page: 0, itemName: 'INTERLINING, 100% POLYESTER', internalCode: '',
+    supplier: '', unit: 'YDS', extractedInfo: 'INTERLINING, 100% POLYESTER',
+    _sizeScale: '', _quantity: '', _groupKey: '', _fabricColorways: '',
+    _fixedFabricPrice: 0.26,
+  });
   const printItems = dedupeByGroupKey(extractedItems.filter(r => r.section.toLowerCase().startsWith('print')));
   const accessoryItemsAll = trimAndLabels.filter(r => !isInterfacing(r));
 
@@ -993,10 +1020,16 @@ async function mergeIntoCostBreakDown(templateArrayBuffer, extractedItems, produ
     while (usedNames.has(tabName)) tabName = sanitizeSheetName(`${rawName} ${++n}`);
     usedNames.add(tabName);
 
-    // First size reuses (renames) the master sheet in place; every
-    // additional size gets a full manual clone of its layout.
-    const ws = s === 0 ? masterWs : cloneWorksheetInto(workbook, masterWs, tabName);
-    if (s === 0) ws.name = tabName;
+    // Every size gets a full manual clone of the pristine template layout
+    // - never reuse/mutate masterWs directly for any size, even the
+    // first. Writing into masterWs and then cloning it for later sizes
+    // used to carry the first size's already-filled rows into every
+    // subsequent clone, which the "preserve already-filled rows" logic in
+    // fillSection would then mistake for pre-existing static content and
+    // append past - doubling Accessories/Labels items on every tab after
+    // the first, and throwing off the row math badly enough to corrupt
+    // the Total Accessories Cost formula.
+    const ws = cloneWorksheetInto(workbook, masterWs, tabName);
 
     let maxRow = ws.rowCount;
     normalizeFormulas(ws, maxRow, 22);
@@ -1038,6 +1071,11 @@ async function mergeIntoCostBreakDown(templateArrayBuffer, extractedItems, produ
 
     counts.push({ tab: tabName, fabric: fabricItems.length, print: printItems.length, accessories: accessoryItems.length });
   }
+
+  // masterWs was only ever a cloning source, never one of the output
+  // tabs - drop it so the file doesn't ship an extra untagged "Format"
+  // sheet.
+  workbook.removeWorksheet(masterWs.id);
 
   const buffer = await workbook.xlsx.writeBuffer();
   return { buffer, counts };
