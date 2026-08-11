@@ -757,6 +757,44 @@ function computeConsumption(item){
   return Math.round(q * 1.05 * 100) / 100;
 }
 
+// Known standard prices for common Haddad accessory codes. Price is either
+// a plain number or an ExcelJS formula object (no leading "="); every
+// formula here is self-contained literal arithmetic with no cell
+// references, so it can never produce a formula error regardless of which
+// row it ends up on.
+const ACCESSORY_PRICE_RULES = {
+  'T0140': { price: { formula: '16.71/1000*1.1' }, supplier: 'YKK', remark: 'FREIGHT CHARGE ADDED' },
+  'T0664': { price: 0.06, supplier: 'Approximate', remark: '' },
+  'T0142': { price: { formula: '2.4/144' }, supplier: 'EMSIG', remark: '' },
+  'P0110': { price: { formula: '0.008*1.1' }, supplier: 'MAXIM', remark: 'FREIGHT CHARGE ADDED' },
+  'P1029': { price: { formula: '0.028*1.1' }, supplier: 'MAXIM', remark: 'FREIGHT CHARGE ADDED' },
+  'P1132': { price: { formula: '0.019*1.1' }, supplier: 'MAXIM', remark: 'FREIGHT CHARGE ADDED' },
+  'P1130': { price: { formula: '0.015*1.1' }, supplier: 'MAXIM', remark: 'FREIGHT CHARGE ADDED' },
+  'P2610': { price: 0.016, supplier: 'UNIGLORY', remark: '' },
+  'P3540': { price: { formula: '0.015*1.1' }, supplier: 'MAXIM', remark: 'FREIGHT CHARGE ADDED' },
+  'P3541': { price: { formula: '0.01*1.1' }, supplier: 'MAXIM', remark: 'FREIGHT CHARGE ADDED' },
+  'T0647': { price: { formula: '24.85/1000*1.1' }, supplier: 'YKK', remark: 'FREIGHT CHARGE ADDED' },
+  'T0648': { price: { formula: '24.85/1000*1.1' }, supplier: 'YKK', remark: 'FREIGHT CHARGE ADDED' },
+  'T0646': { price: { formula: '22.27/1000*1.1' }, supplier: 'YKK', remark: 'FREIGHT CHARGE ADDED' },
+  'T0138': { price: { formula: '3.55/1000*1.1' }, supplier: 'YKK', remark: 'FREIGHT CHARGE ADDED' },
+  'T0340': { price: 0.10, supplier: 'REGULAR PRICE', remark: '' },
+  'P0108': { price: { formula: '0.008*1.1' }, supplier: 'MAXIM', remark: 'FREIGHT CHARGE ADDED' },
+  'P1098': { price: 0.016, supplier: 'UNIGLORY', remark: '' },
+  'T0330': { price: 0.04, supplier: 'REGULAR PRICE', remark: '' },
+};
+
+// A merged zipper row's internalCode is a "+"-joined concatenation (e.g.
+// "T0047 + T0356 + T0560A") - check each individual code, not just an
+// exact match on the whole string.
+function findAccessoryRule(item){
+  const codes = String(item.internalCode || '').split('+').map(s => s.trim());
+  for (const c of codes) if (ACCESSORY_PRICE_RULES[c]) return ACCESSORY_PRICE_RULES[c];
+  return null;
+}
+function matchAccessoryPrice(item){ const r = findAccessoryRule(item); return r ? r.price : null; }
+function matchAccessorySupplier(item){ const r = findAccessoryRule(item); return r ? r.supplier : null; }
+function matchAccessoryRemark(item){ const r = findAccessoryRule(item); return (r && r.remark) ? r.remark : null; }
+
 function matchFabricPrice(item){
   if (item._fixedFabricPrice != null) return item._fixedFabricPrice;
   const text = (item.itemName || '') + ' ' + (item.extractedInfo || '');
@@ -1051,7 +1089,12 @@ async function mergeIntoCostBreakDown(templateArrayBuffer, extractedItems, produ
 
     const accessoryItems = dedupeByGroupKey(accessoryItemsAll.filter(r => itemAppliesToSize(r, sizeLabel)));
 
-    const cfgAcc = { ...SECTION_CONFIG.Accessories, extraCols: [{ col: 9, compute: computeConsumption }] };
+    const cfgAcc = { ...SECTION_CONFIG.Accessories, extraCols: [
+      { col: 9, compute: computeConsumption },
+      { col: 12, compute: matchAccessoryPrice },
+      { col: 16, compute: matchAccessorySupplier },
+      { col: 17, compute: matchAccessoryRemark },
+    ] };
     ({ maxSheetRow: maxRow } = fillSection(ws, cfgAcc, accessoryItems, maxRow));
 
     const cfgPrint = { ...SECTION_CONFIG.Print };
