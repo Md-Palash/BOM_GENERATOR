@@ -84,7 +84,12 @@ async function extractAllDecathlonBlocks(file, onProgress) {
   }
 
   function freshSections() {
-    return { Fabrics: [], 'Legal Marking': [], Label: [], Graphic: [], Accessories: [], 'Sales Packaging': [], 'Transport Packaging': [] };
+    // Transport Packaging is intentionally excluded — those items are never
+    // used downstream (per current business rule), so we don't bother
+    // collecting them at all. The section heading stays in
+    // DECATHLON_SECTION_KEYWORDS so its rows still get recognized as their
+    // own section and don't leak into the preceding Sales Packaging section.
+    return { Fabrics: [], 'Legal Marking': [], Label: [], Graphic: [], Accessories: [], 'Sales Packaging': [] };
   }
 
   for (let p = 1; p <= pdf.numPages; p++) {
@@ -251,14 +256,51 @@ function isDecathlonThreadPart(part) {
   return /thread/i.test(part || '');
 }
 
+// Zippers live inside Accessories, but different tech packs (even from the
+// same buyer) label them differently:
+//  - some prefix the Part with "Z" + a number, e.g. "Z1 - hand pocket
+//    -chain", "Z2 - ventilation -Slider", "Z5 - Back hoodamovible zipper"
+//  - others just say "front zip" / "pocket zipper" directly in the Part,
+//    with no "Z" prefix at all
+// Component text is more standardized supplier-code language (ZCOIL / ZVIS
+// / ZCHAIN / ZPUL / ZCCP / SLID COIL...) regardless of how Part is worded,
+// so it's checked too. Used to carve zipper rows out of Accessories so they
+// keep following the old (DSM+Part) dedupe rule instead of the new
+// full-row rule (see dedupeDecathlonSections).
+function isDecathlonZipperPart(row) {
+  const part = (row.part || '').trim();
+  const component = (row.component || '').trim();
+  if (/^Z\d*\s*-/i.test(part)) return true;                    // "Z1 - ...", "Z - ..."
+  if (/\bzip(per)?\b/i.test(part)) return true;                 // "front zip", "pocket zipper"
+  if (/^(ZCOIL|ZVIS|ZCHAIN|ZPUL|ZCCP)\b/i.test(component)) return true; // zip supplier codes
+  if (/\bslid(er)?\s*coil\b/i.test(component)) return true;     // slider hardware
+  return false;
+}
+
+// Full-row signature for the "same DSM code" dedupe rule: two rows only
+// count as duplicates if EVERY field matches, not just DSM+Part.
+function decathlonRowSignature(r) {
+  return [r.part, r.dsm, r.model, r.component, r.itemCode, r.gridValue, r.items, r.qty, r.unit, r.comments]
+    .map(v => (v || '').toString().trim().toLowerCase())
+    .join('\u0001');
+}
+
 // Dedupe rules (per business logic):
 //  - Fabrics: a row is a duplicate only if BOTH its DSM code and its Item
 //    Code match a row already kept — keep the first occurrence, drop the rest.
-//  - Every other section: a row is a duplicate if its DSM code AND its Part
-//    (Type) match a row already kept.
+//  - Zippers (Accessories rows identified by isDecathlonZipperPart — Part
+//    starting with "Z", the word "zip"/"zipper" in Part, or a recognized
+//    zip-component supplier code) and the whole Sales Packaging section: a
+//    row is a duplicate if its DSM code AND its Part (Type) match a row
+//    already kept — the original rule, unchanged.
+//  - Every other section (Legal Marking, Label, Graphic, and non-zipper
+//    Accessories rows): when the DSM code matches a row already kept, the
+//    two rows are only treated as duplicates if EVERY other field also
+//    matches exactly. If anything else differs, both rows are kept.
 //  - Thread items (Part containing "thread", e.g. "Thread Tape" or
 //    "Thread // Needle") are collapsed to a single representative row
-//    regardless of DSM/Part — which one survives doesn't matter.
+//    regardless of DSM/Part — which one survives doesn't matter. This takes
+//    priority over both rules above.
 function dedupeDecathlonSections(sections) {
   const seenFab = new Set();
   sections.Fabrics = (sections.Fabrics || []).filter(r => {
@@ -268,11 +310,12 @@ function dedupeDecathlonSections(sections) {
     return true;
   });
 
-  const OTHER_SECTIONS = ['Legal Marking', 'Label', 'Graphic', 'Accessories', 'Sales Packaging', 'Transport Packaging'];
+  const OTHER_SECTIONS = ['Legal Marking', 'Label', 'Graphic', 'Accessories', 'Sales Packaging'];
   for (const name of OTHER_SECTIONS) {
     const rows = sections[name] || [];
     const kept = [];
-    const seenPairs = new Set();
+    const seenPairs = new Set();     // DSM+Part rule — zippers & Sales Packaging
+    const seenFullRows = new Set();  // full-row rule — everything else
     let threadTaken = false;
     for (const r of rows) {
       if (isDecathlonThreadPart(r.part)) {
@@ -281,10 +324,18 @@ function dedupeDecathlonSections(sections) {
         kept.push(r);
         continue;
       }
-      const key = (r.dsm || '') + '\u0001' + (r.part || '');
-      if (seenPairs.has(key)) continue;
-      seenPairs.add(key);
-      kept.push(r);
+      const useDsmPartRule = name === 'Sales Packaging' || (name === 'Accessories' && isDecathlonZipperPart(r));
+      if (useDsmPartRule) {
+        const key = (r.dsm || '') + '\u0001' + (r.part || '');
+        if (seenPairs.has(key)) continue;
+        seenPairs.add(key);
+        kept.push(r);
+      } else {
+        const key = decathlonRowSignature(r);
+        if (seenFullRows.has(key)) continue;
+        seenFullRows.add(key);
+        kept.push(r);
+      }
     }
     sections[name] = kept;
   }
@@ -412,26 +463,66 @@ function fillSectionDecathlon(ws, cfg, items, maxSheetRow) {
   return { maxSheetRow, totalRow: cfg.totalRow };
 }
 
+// A "pce"-unit consumption gets a flat 2% uplift per current business rule
+// (e.g. extracted qty 1 -> 1.02 in the Consumption cell). Fabrics are
+// exempt because fabric consumption is never written at all (see below).
+const DECATHLON_PCE_UPLIFT = 1.02;
+function decathlonConsumptionValue(r) {
+  const n = parseFloat(r.qty);
+  if (isNaN(n)) return r.qty; // leave non-numeric qty untouched, as before
+  if ((r.unit || '').trim().toLowerCase() === 'pce') {
+    return Math.round(n * DECATHLON_PCE_UPLIFT * 1e6) / 1e6; // trim float noise
+  }
+  return n;
+}
+
 // Fills one already-loaded "Format" worksheet with one R3's (deduped) data.
+// r3List is the full set of R3 numbers that share this exact BOM (see
+// buildMultiCCCostBreakDown) — when there's more than one, they all go into
+// the R3 cell together, comma-separated, instead of getting separate tabs.
 // Returns per-section item counts.
-function fillDecathlonWorksheet(ws, extracted) {
+function fillDecathlonWorksheet(ws, extracted, r3List) {
   const { productName, ccNumber, r3, sections } = extracted;
   let maxRow = ws.rowCount;
   normalizeFormulas(ws, maxRow, 27);
 
   if (productName) ws.getCell('B1').value = productName;
-  if (ccNumber) ws.getCell('B2').value = String(ccNumber);
-  if (r3) ws.getCell('B4').value = String(r3);
 
-  const toItems = rows => rows.map(r => ({
-    extractedInfo: decathlonDesignation(r),
-    unit: r.unit,
-    type: r.part,
-    qty: (() => { const n = parseFloat(r.qty); return isNaN(n) ? r.qty : n; })(),
-  }));
+  // CC and R3 are written as real numbers (not strings) so Excel doesn't
+  // flag them with a "number stored as text" warning. A merged R3 cell
+  // (multiple R3s sharing one BOM) can't be a single number, so it falls
+  // back to a comma-separated text list in that case only.
+  if (ccNumber !== undefined && ccNumber !== null && ccNumber !== '') {
+    const ccNum = Number(ccNumber);
+    ws.getCell('B2').value = Number.isFinite(ccNum) ? ccNum : String(ccNumber);
+  }
+  const r3s = ((r3List && r3List.length) ? r3List : [r3]).filter(Boolean);
+  if (r3s.length === 1) {
+    const r3Num = Number(r3s[0]);
+    ws.getCell('B4').value = Number.isFinite(r3Num) ? r3Num : String(r3s[0]);
+  } else if (r3s.length > 1) {
+    ws.getCell('B4').value = r3s.join(', ');
+  }
+
+  const toItems = (rows, sectionName) => {
+    const isFabric = sectionName === 'Fabrics';
+    return rows.map(r => ({
+      extractedInfo: decathlonDesignation(r),
+      // Fabrics always report in yd regardless of what the tech pack's own
+      // unit column says — consumption isn't filled for fabrics at all
+      // (see qty below), so there's no conversion to do here, just the
+      // fixed unit label.
+      unit: isFabric ? 'yd' : r.unit,
+      type: r.part,
+      // Fabric consumption is intentionally left blank (extraCols below
+      // skips writing when qty is null/undefined). Every other section
+      // gets its normal consumption, with a 2% uplift on "pce" units.
+      qty: isFabric ? null : decathlonConsumptionValue(r),
+    }));
+  };
   const extraCols = [
     { col: 1, compute: it => it.type },
-    { col: 12, compute: it => it.qty },
+    { col: 12, compute: it => it.qty }, // null/undefined -> cell left untouched
   ];
 
   // Bottom-to-top through the sheet so inserting rows in a lower section
@@ -442,7 +533,7 @@ function fillDecathlonWorksheet(ws, extracted) {
     const cfg = { ...DECATHLON_SECTION_CONFIG[name], extraCols };
     const rows = sections[name] || [];
     counts[name] = rows.length;
-    ({ maxSheetRow: maxRow } = fillSectionDecathlon(ws, cfg, toItems(rows), maxRow));
+    ({ maxSheetRow: maxRow } = fillSectionDecathlon(ws, cfg, toItems(rows, name), maxRow));
   }
   return counts;
 }
@@ -530,28 +621,48 @@ async function buildMultiCCCostBreakDown(templateArrayBuffer, ccSessions) {
 
   const report = [];
   for (const session of ccSessions) {
-    const groups = [];
-    let extraIndex = 0;
+    // Pass 1: group every R3 in this tech pack by identical BOM (DSM-code
+    // set). R3s that land in the same group are NOT split into separate
+    // tabs — they all share one tab and go into that tab's R3 cell together.
+    const groups = []; // { dsmSet, entries: [{ r3, data }] }
     for (const data of session.r3DataList) {
       const dsmSet = dsmSetForDecathlonData(data);
       const match = groups.find(g => dsmSetsEqual(g.dsmSet, dsmSet));
       if (match) {
-        report.push({ cc: session.ccNumber, r3: data.r3, sheet: match.sheetName, status: 'duplicate' });
-        continue;
+        match.entries.push({ r3: data.r3, data });
+      } else {
+        groups.push({ dsmSet, entries: [{ r3: data.r3, data }] });
       }
+    }
 
-      const isBase = groups.length === 0;
-      const sheetName = uniqueName(isBase ? String(data.ccNumber) : `${data.ccNumber} V${++extraIndex}`);
+    // Pass 2: one tab per group — first group is the base tab (named after
+    // the CC number itself), every subsequent distinct-BOM group gets its
+    // own "{CC} V1", "{CC} V2", ... tab.
+    let extraIndex = 0;
+    for (let gi = 0; gi < groups.length; gi++) {
+      const group = groups[gi];
+      const isBase = gi === 0;
+      const sheetName = uniqueName(isBase ? String(session.ccNumber) : `${session.ccNumber} V${++extraIndex}`);
+      const r3List = group.entries.map(e => e.r3);
+      const primaryData = group.entries[0].data;
 
       const { ws, isNew } = await getFreshWorksheet();
-      const counts = fillDecathlonWorksheet(ws, data);
+      const counts = fillDecathlonWorksheet(ws, primaryData, r3List);
       if (isNew) {
         cloneWorksheetInto(mainWorkbook, ws, sheetName);
       } else {
         ws.name = sheetName;
       }
-      groups.push({ dsmSet, sheetName });
-      report.push({ cc: session.ccNumber, r3: data.r3, sheet: sheetName, status: isBase ? 'base' : 'new-tab', counts });
+      for (const r3 of r3List) {
+        report.push({
+          cc: session.ccNumber,
+          r3,
+          sheet: sheetName,
+          status: isBase ? 'base' : 'new-tab',
+          counts,
+          sharedWith: r3List.length > 1 ? r3List.filter(x => x !== r3) : null,
+        });
+      }
     }
   }
 
@@ -752,8 +863,9 @@ cbdBtnDec.addEventListener('click', async () => {
     URL.revokeObjectURL(url);
 
     const parts = report.map(r => {
-      if (r.status === 'duplicate') return `CC ${r.cc} R3 ${r.r3} → same BOM as tab "${r.sheet}" (skipped)`;
-      return `CC ${r.cc} R3 ${r.r3} → tab "${r.sheet}"`;
+      let line = `CC ${r.cc} R3 ${r.r3} → tab "${r.sheet}"`;
+      if (r.sharedWith && r.sharedWith.length) line += ` (same BOM as R3 ${r.sharedWith.join(', ')})`;
+      return line;
     });
     cbdStatusDec.textContent = `Done — ${parts.join(' | ')}`;
     cbdStatusDec.className = 'status ok';
