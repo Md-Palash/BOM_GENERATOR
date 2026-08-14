@@ -302,7 +302,86 @@
     </div>
   </div>
 
-  <!-- ============ MALACCA TOOL VIEW ============ -->
+  <!-- ============ MALACCA HUB VIEW ============ -->
+  <div class="tool-view" id="malaccaHubView" hidden>
+    <button class="back-btn" id="malaccaHubBackBtn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+      Back
+    </button>
+
+    <div class="home-header">
+      <h1>MALACCA <span>Workflow</span></h1>
+    </div>
+    <div class="brand-grid">
+      <button class="brand-card" id="malaccaHubSupplyCard" style="--glow:rgba(16,150,100,.35); --mark-bg:#0F9960;">
+        <div class="brand-card-mark">S</div>
+        <div class="brand-card-name">Supply Chain Sheet</div>
+      </button>
+      <button class="brand-card" id="malaccaHubBomCard" style="--glow:rgba(16,150,100,.35); --mark-bg:#0F9960;">
+        <div class="brand-card-mark">B</div>
+        <div class="brand-card-name">Generate BOM</div>
+      </button>
+    </div>
+  </div>
+
+  <!-- ============ MALACCA SUPPLY CHAIN VIEW ============ -->
+  <div class="tool-view" id="malaccaSupplyView" hidden>
+    <button class="back-btn" id="backBtnMalSupply">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+      Back
+    </button>
+
+    <div class="card hero-card">
+      <div class="hero-top">
+        <div class="hero-copy">
+          <div class="badge"><span class="dot"></span>Malacca Supply Chain Utility</div>
+          <h1>Multiple TPs <span class="arrow-glyph">→</span> Supply Chain Sheet</h1>
+        </div>
+        <div class="hero-pills">
+          <span class="pill">Supply Chain</span>
+        </div>
+      </div>
+      <p class="lede">Upload as many Malacca tech pack PDFs as you like at once. Every Fabric line goes to the Fabric tab; every Trims, Decoration, Product Packaging and Shipping & Packing line goes to the Trims tab — each tagged with its own tech pack's style number, with a blank row separating each style.</p>
+    </div>
+
+    <div class="dropzone" id="dropzoneMalSupply">
+      <input type="file" id="fileInputMalSupply" accept="application/pdf" multiple>
+      <div class="dz-icon-wrap">
+        <svg class="dz-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M12 15l-4.5-4.5M12 15l4.5-4.5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+      </div>
+      <div class="dz-title">Drop tech pack PDFs here or click to browse</div>
+      <div class="dz-sub">SELECT MULTIPLE FILES AT ONCE — RUNS ENTIRELY IN YOUR BROWSER</div>
+    </div>
+
+    <div id="fileListMalSupply"></div>
+
+    <button class="btn" id="processBtnMalSupply" disabled>
+      <svg class="spinner" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"/><path d="M22 12a10 10 0 0 0-10-10" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>
+      <span id="processLabelMalSupply">Extract &amp; Generate Supply Chain Sheet</span>
+    </button>
+
+    <div class="status" id="statusMalSupply"></div>
+
+    <div class="results" id="resultsMalSupply">
+      <div class="card cbd-section">
+        <div class="cbd-head">
+          <div class="icon-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"/><path d="M4 10h16M10 4v16"/></svg>
+          </div>
+          <div>
+            <h2>Supply Chain Sheet</h2>
+            <p id="countsMalSupply">Two tabs: Fabric and Trims, each with a Style No column on the left and a blank row separating every style.</p>
+          </div>
+        </div>
+        <button class="btn secondary" id="downloadBtnMalSupply" style="margin-top:0;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M12 15l-4.5-4.5M12 15l4.5-4.5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+          Download Supply Chain Sheet (Excel)
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ MALACCA TOOL VIEW (BOM / CBD GENERATION) ============ -->
   <div class="tool-view" id="malaccaView" hidden>
     <button class="back-btn" id="backBtnMal">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
@@ -313,13 +392,13 @@
       <div class="hero-top">
         <div class="hero-copy">
           <div class="badge"><span class="dot"></span>Malacca BOM Utility</div>
-          <h1>Tech Pack <span class="arrow-glyph">→</span> Supply Chain / CBD</h1>
+          <h1>Tech Pack <span class="arrow-glyph">→</span> CBD Costing Sheet</h1>
         </div>
         <div class="hero-pills">
           <span class="pill">BOM</span>
         </div>
       </div>
-      <p class="lede">Upload a Malacca (Sportmaster/Kappa-style) tech pack PDF. We'll pull every Fabric, Trims, Decoration, Product Packaging and Shipping & Packing line, then let you export a Supply Chain worksheet or generate the full CBD costing file.</p>
+      <p class="lede">Upload a Malacca (Sportmaster/Kappa-style) tech pack PDF. We'll pull every Fabric, Trims, Decoration, Product Packaging and Shipping & Packing line, then generate the full CBD costing file.</p>
     </div>
 
     <div class="dropzone" id="dropzoneMal">
@@ -345,22 +424,6 @@
     <div class="status" id="statusMal"></div>
 
     <div class="results" id="resultsMal">
-      <div class="card cbd-section">
-        <div class="cbd-head">
-          <div class="icon-wrap">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"/><path d="M4 10h16M10 4v16"/></svg>
-          </div>
-          <div>
-            <h2>For Supply Chain</h2>
-            <p>Two-tab Excel: Fabric (Fabric category, Fabric code, Reference no, Description, Supplier) and Trims (Item name, Item code, Reference no, Size, Description, Supplier) — Trims covers every non-Fabric section combined.</p>
-          </div>
-        </div>
-        <button class="btn secondary" id="supplyChainBtnMal" style="margin-top:0;">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M12 15l-4.5-4.5M12 15l4.5-4.5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
-          For Supply Chain
-        </button>
-      </div>
-
       <div class="card cbd-section">
         <div class="cbd-head">
           <div class="icon-wrap">
