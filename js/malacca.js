@@ -54,26 +54,31 @@ const MALACCA_REQUIRED_COLUMNS = [
 // column after them. Anchoring on each required column's own label makes
 // extraction immune to how many extra columns sit around it.
 function deriveMalaccaColumnBoundaries(headerItems) {
-  function anchorX(text, occurrence) {
-    const matches = headerItems.filter(it => it.text === text).sort((a, b) => a.x - b.x);
+  // Short prefixes chosen to survive whatever point a label happens to
+  // wrap at in a given tech pack (e.g. "Component Name" has been seen
+  // wrapping as both "Compo"/"nent Name" and "Compone"/"nt Name" across
+  // real documents — "Compo" matches either). A prefix match rather than
+  // exact equality is what makes this robust to that variability.
+  function anchorX(prefix, occurrence) {
+    const matches = headerItems.filter(it => it.text.startsWith(prefix)).sort((a, b) => a.x - b.x);
     return matches[occurrence] !== undefined ? matches[occurrence].x : null;
   }
   const candidates = [
     ['placement',          anchorX('Placement', 0)],
-    ['componentName',      anchorX('Compone', 0)],
-    ['materialType',       anchorX('Material', 0)], // "Material Type" always precedes "Material"
-    ['material',           anchorX('Material', 1)],
-    ['referenceNo',        anchorX('Reference', 0)],
-    ['supplier',           anchorX('Supplier', 0)],
-    ['nominated',          anchorX('Nominate', 0)],
-    ['commentsSM',         anchorX('Comment', 0)],
+    ['componentName',      anchorX('Compo', 0)],
+    ['materialType',       anchorX('Mater', 0)],   // "Material Type" always precedes "Material"
+    ['material',           anchorX('Mater', 1)],
+    ['referenceNo',        anchorX('Refer', 0)],
+    ['supplier',           anchorX('Suppl', 0)],
+    ['nominated',          anchorX('Nomin', 0)],
+    ['commentsSM',         anchorX('Comm', 0)],
     ['finish',             anchorX('Finish', 0)],   // optional
     ['size',               anchorX('Size', 0)],
-    ['consumption',        anchorX('Consump', 0)],
-    ['articleUOM',         anchorX('Article', 0)],
+    ['consumption',        anchorX('Consu', 0)],
+    ['articleUOM',         anchorX('Artic', 0)],
     ['price',              anchorX('Price', 0)],    // optional
-    ['cuttableWidth',      anchorX('Cuttable', 0)], // "Cuttable Width" always precedes "-Color"
-    ['cuttableWidthColor', anchorX('Cuttable', 1)],
+    ['cuttableWidth',      anchorX('Cutta', 0)],    // "Cuttable Width" always precedes "-Color"
+    ['cuttableWidthColor', anchorX('Cutta', 1)],
   ];
 
   const present = candidates.filter(([, x]) => x !== null);
@@ -141,7 +146,7 @@ function extractMalaccaCoverInfo(items) {
 
   // Derive each column's starting x from its known label anchors.
   const colStart = MALACCA_COVER_COLUMN_ANCHORS.map(labels => {
-    const xs = headerItems.filter(it => labels.includes(it.text)).map(it => it.x);
+    const xs = headerItems.filter(it => labels.some(label => it.text.startsWith(label))).map(it => it.x);
     return xs.length ? Math.min(...xs) : null;
   });
   if (colStart.some(x => x === null)) return null; // layout didn't match — bail out safely
@@ -193,8 +198,8 @@ function extractMalaccaCoverInfo(items) {
   const col0ValueSplit = col0LabelX + 50; // small gap between label and value sub-columns
   const col0Label = col0Items.filter(it => it.x < col0ValueSplit);
   const col0Value = col0Items.filter(it => it.x >= col0ValueSplit);
-  const prodItem = col0Label.find(it => it.text === 'Production');
-  const destItem = col0Label.find(it => it.text === 'Destination:');
+  const prodItem = col0Label.find(it => it.text.startsWith('Production'));
+  const destItem = col0Label.find(it => it.text.startsWith('Destination'));
   let productionManager = '';
   if (prodItem && destItem) {
     productionManager = col0Value
