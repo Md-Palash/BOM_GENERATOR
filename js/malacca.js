@@ -387,31 +387,41 @@ function malaccaCleanText(s) {
 }
 
 /* ============================================================
-   MALACCA — "FOR SUPPLY CHAIN" EXPORT (2-tab raw Excel, no formulas)
+   MALACCA — SUPPLY CHAIN EXPORT (2-tab raw Excel, no formulas)
+   Accepts results from one or more tech packs — each tab gets a leading
+   Style No column, and a blank row is left after every style's block so
+   multiple styles stay visually separated in the same sheet.
    ============================================================ */
-function buildMalaccaSupplyChain(sections, fileLabel) {
-  const fabricRows = [['Fabric category', 'Fabric code', 'Reference no', 'Description', 'Supplier']];
-  for (const r of (sections['01 - Fabric'] || [])) {
-    fabricRows.push([r.componentName, malaccaLeadingNumber(r.material), malaccaCleanText(r.referenceNo), r.material, r.supplier]);
-  }
+function buildMalaccaSupplyChain(results, fileLabel) {
+  const fabricRows = [['Style No', 'Fabric category', 'Fabric code', 'Reference no', 'Description', 'Supplier']];
+  const trimsRows = [['Style No', 'Item name', 'Item code', 'Reference no', 'Size', 'Description', 'Supplier']];
 
-  const trimsRows = [['Item name', 'Item code', 'Reference no', 'Size', 'Description', 'Supplier']];
-  for (const [secKey, items] of Object.entries(sections)) {
-    if (secKey === '01 - Fabric') continue;
-    for (const r of items) {
-      trimsRows.push([r.materialType, malaccaLeadingNumber(r.material), malaccaCleanText(r.referenceNo), r.size, r.material, r.supplier]);
+  for (const { styleNumber, sections } of results) {
+    for (const r of (sections['01 - Fabric'] || [])) {
+      fabricRows.push([styleNumber, r.componentName, malaccaLeadingNumber(r.material), malaccaCleanText(r.referenceNo), r.material, r.supplier]);
     }
+    fabricRows.push([]); // blank separator row after this style
+
+    for (const [secKey, items] of Object.entries(sections)) {
+      if (secKey === '01 - Fabric') continue;
+      for (const r of items) {
+        trimsRows.push([styleNumber, r.materialType, malaccaLeadingNumber(r.material), malaccaCleanText(r.referenceNo), r.size, r.material, r.supplier]);
+      }
+    }
+    trimsRows.push([]); // blank separator row after this style
   }
 
   const wsFabric = XLSX.utils.aoa_to_sheet(fabricRows);
-  wsFabric['!cols'] = [{ wch: 20 }, { wch: 12 }, { wch: 16 }, { wch: 60 }, { wch: 24 }];
+  wsFabric['!cols'] = [{ wch: 12 }, { wch: 20 }, { wch: 12 }, { wch: 16 }, { wch: 60 }, { wch: 24 }];
   const wsTrims = XLSX.utils.aoa_to_sheet(trimsRows);
-  wsTrims['!cols'] = [{ wch: 20 }, { wch: 12 }, { wch: 16 }, { wch: 12 }, { wch: 60 }, { wch: 24 }];
+  wsTrims['!cols'] = [{ wch: 12 }, { wch: 20 }, { wch: 12 }, { wch: 16 }, { wch: 12 }, { wch: 60 }, { wch: 24 }];
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, wsFabric, 'Fabric');
   XLSX.utils.book_append_sheet(wb, wsTrims, 'Trims');
-  XLSX.writeFile(wb, `${fileLabel || 'malacca'}_SupplyChain.xlsx`);
+
+  const label = fileLabel || (results.length === 1 ? results[0].styleNumber : `${results.length}_styles`);
+  XLSX.writeFile(wb, `Malacca_SupplyChain_${label}.xlsx`);
 }
 
 /* ============================================================
@@ -584,18 +594,158 @@ async function buildMalaccaCBD(templateArrayBuffer, sections, styleNumber, cover
 /* ============================================================
    MALACCA — UI WIRING
    ============================================================ */
+
+/* ---- entry point + hub (Supply Chain Sheet / Generate BOM) ---- */
+const malaccaHubView = document.getElementById('malaccaHubView');
+const malaccaSupplyView = document.getElementById('malaccaSupplyView');
 const malaccaView = document.getElementById('malaccaView');
+
 document.getElementById('brandMalacca').addEventListener('click', () => {
   requestUnlock('malacca', () => {
     homeView.hidden = true;
-    malaccaView.hidden = false;
+    malaccaHubView.hidden = false;
   });
+});
+document.getElementById('malaccaHubBackBtn').addEventListener('click', () => {
+  malaccaHubView.hidden = true;
+  homeView.hidden = false;
+});
+document.getElementById('malaccaHubSupplyCard').addEventListener('click', () => {
+  malaccaHubView.hidden = true;
+  malaccaSupplyView.hidden = false;
+});
+document.getElementById('malaccaHubBomCard').addEventListener('click', () => {
+  malaccaHubView.hidden = true;
+  malaccaView.hidden = false;
+});
+document.getElementById('backBtnMalSupply').addEventListener('click', () => {
+  malaccaSupplyView.hidden = true;
+  malaccaHubView.hidden = false;
 });
 document.getElementById('backBtnMal').addEventListener('click', () => {
   malaccaView.hidden = true;
-  homeView.hidden = false;
+  malaccaHubView.hidden = false;
 });
 
+/* ---- Supply Chain Sheet (multi-file upload) ---- */
+const dropzoneMalSupply = document.getElementById('dropzoneMalSupply');
+const fileInputMalSupply = document.getElementById('fileInputMalSupply');
+const fileListMalSupply = document.getElementById('fileListMalSupply');
+const processBtnMalSupply = document.getElementById('processBtnMalSupply');
+const processLabelMalSupply = document.getElementById('processLabelMalSupply');
+const statusMalSupply = document.getElementById('statusMalSupply');
+const resultsMalSupply = document.getElementById('resultsMalSupply');
+const countsMalSupply = document.getElementById('countsMalSupply');
+const downloadBtnMalSupply = document.getElementById('downloadBtnMalSupply');
+
+let currentFilesMalSupply = []; // File[]
+let currentMalSupplyResults = null; // [{ styleNumber, sections }, ...] once processed
+
+function setStatusMalSupply(msg, cls) {
+  statusMalSupply.textContent = msg;
+  statusMalSupply.className = 'status' + (cls ? ' ' + cls : '');
+}
+
+function renderFileListMalSupply() {
+  fileListMalSupply.innerHTML = '';
+  currentFilesMalSupply.forEach((file, idx) => {
+    const row = document.createElement('div');
+    row.className = 'filebar show';
+    row.innerHTML = `
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+      <span class="name">${file.name}</span>
+      <span class="clear" data-idx="${idx}">✕ remove</span>
+    `;
+    fileListMalSupply.appendChild(row);
+  });
+}
+
+function addFilesMalSupply(fileList) {
+  const incoming = Array.from(fileList).filter(f => f.type === 'application/pdf');
+  if (!incoming.length) {
+    setStatusMalSupply('Please choose PDF files.', 'err');
+    return;
+  }
+  const existingKeys = new Set(currentFilesMalSupply.map(f => f.name + f.size));
+  for (const f of incoming) {
+    const key = f.name + f.size;
+    if (!existingKeys.has(key)) {
+      currentFilesMalSupply.push(f);
+      existingKeys.add(key);
+    }
+  }
+  renderFileListMalSupply();
+  setStatusMalSupply('');
+  resultsMalSupply.classList.remove('show');
+  currentMalSupplyResults = null;
+  processBtnMalSupply.disabled = currentFilesMalSupply.length === 0;
+}
+
+dropzoneMalSupply.addEventListener('dragover', e => { e.preventDefault(); dropzoneMalSupply.classList.add('drag'); });
+dropzoneMalSupply.addEventListener('dragleave', () => dropzoneMalSupply.classList.remove('drag'));
+dropzoneMalSupply.addEventListener('drop', e => {
+  e.preventDefault(); dropzoneMalSupply.classList.remove('drag');
+  if (e.dataTransfer.files.length) addFilesMalSupply(e.dataTransfer.files);
+});
+fileInputMalSupply.addEventListener('change', e => {
+  if (e.target.files.length) addFilesMalSupply(e.target.files);
+  fileInputMalSupply.value = ''; // allow re-adding the same file after removal
+});
+fileListMalSupply.addEventListener('click', e => {
+  const idx = e.target.getAttribute('data-idx');
+  if (idx === null) return;
+  currentFilesMalSupply.splice(Number(idx), 1);
+  renderFileListMalSupply();
+  resultsMalSupply.classList.remove('show');
+  currentMalSupplyResults = null;
+  processBtnMalSupply.disabled = currentFilesMalSupply.length === 0;
+});
+
+processBtnMalSupply.addEventListener('click', async () => {
+  if (!currentFilesMalSupply.length) return;
+  processBtnMalSupply.disabled = true;
+  processBtnMalSupply.classList.add('loading');
+  resultsMalSupply.classList.remove('show');
+  currentMalSupplyResults = [];
+  try {
+    for (let i = 0; i < currentFilesMalSupply.length; i++) {
+      const file = currentFilesMalSupply[i];
+      processLabelMalSupply.textContent = `Extracting ${i + 1} / ${currentFilesMalSupply.length}...`;
+      const { sections, styleNumber } = await extractMalaccaPdf(file, (p, total) => {
+        setStatusMalSupply(`File ${i + 1} of ${currentFilesMalSupply.length} (${file.name}) — scanning page ${p} of ${total}...`);
+      });
+      currentMalSupplyResults.push({
+        styleNumber: styleNumber || malaccaStyleFromFilename(file.name),
+        sections,
+      });
+    }
+    const totalItems = currentMalSupplyResults.reduce((sum, r) => sum + malaccaItemCount(r.sections), 0);
+    if (totalItems === 0) {
+      setStatusMalSupply('No BOM line items were found in the uploaded tech packs.', 'err');
+      currentMalSupplyResults = null;
+    } else {
+      const styleList = currentMalSupplyResults.map(r => r.styleNumber).join(', ');
+      setStatusMalSupply(`Done — ${totalItems} items extracted across ${currentMalSupplyResults.length} style(s): ${styleList}.`, 'ok');
+      countsMalSupply.textContent = `Two tabs: Fabric and Trims, each with a Style No column on the left and a blank row separating every style. Styles included: ${styleList}.`;
+      resultsMalSupply.classList.add('show');
+    }
+  } catch (err) {
+    console.error(err);
+    setStatusMalSupply('Something went wrong reading these PDFs: ' + err.message, 'err');
+    currentMalSupplyResults = null;
+  } finally {
+    processBtnMalSupply.disabled = false;
+    processBtnMalSupply.classList.remove('loading');
+    processLabelMalSupply.textContent = 'Extract & Generate Supply Chain Sheet';
+  }
+});
+
+downloadBtnMalSupply.addEventListener('click', () => {
+  if (!currentMalSupplyResults) return;
+  buildMalaccaSupplyChain(currentMalSupplyResults);
+});
+
+/* ---- Generate BOM (single-file upload, CBD costing sheet) ---- */
 const dropzoneMal = document.getElementById('dropzoneMal');
 const fileInputMal = document.getElementById('fileInputMal');
 const filebarMal = document.getElementById('filebarMal');
@@ -605,7 +755,6 @@ const processBtnMal = document.getElementById('processBtnMal');
 const processLabelMal = document.getElementById('processLabelMal');
 const statusMal = document.getElementById('statusMal');
 const resultsMal = document.getElementById('resultsMal');
-const supplyChainBtnMal = document.getElementById('supplyChainBtnMal');
 const cbdBtnMal = document.getElementById('cbdBtnMal');
 const cbdLabelMal = document.getElementById('cbdLabelMal');
 const cbdStatusMal = document.getElementById('cbdStatusMal');
@@ -698,11 +847,6 @@ processBtnMal.addEventListener('click', async () => {
     processBtnMal.classList.remove('loading');
     processLabelMal.textContent = 'Extract Tech Pack';
   }
-});
-
-supplyChainBtnMal.addEventListener('click', () => {
-  if (!currentMalSections) return;
-  buildMalaccaSupplyChain(currentMalSections, currentMalStyleNumber);
 });
 
 cbdBtnMal.addEventListener('click', async () => {
