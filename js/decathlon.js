@@ -427,18 +427,33 @@ function fillSectionDecathlon(ws, cfg, items, maxSheetRow) {
   }
 
   const UNIT_COL = 13; // column M — Per unit
-  const INPUT_COLS = [1, 2, 6, 7, 8, 9, 10, 12, 13, 14, 17, 18]; // A,B,F,G,H,I,J,L,M,N,Q,R
+  const INPUT_COLS = [1, 2, 6, 7, 8, 9, 10, 12, 13, 14, 17, 18, 22]; // A,B,F,G,H,I,J,L,M,N,Q,R,V
   items.forEach((item, i) => {
     const r = first + i;
     // Clear the whole row's input columns first so no stale template sample
-    // data survives into a freshly-written row.
-    for (const col of INPUT_COLS) ws.getCell(r, col).value = null;
+    // data (or a stale style from a previous run, e.g. a red "Price not
+    // found" font) survives into a freshly-written row.
+    for (const col of INPUT_COLS) {
+      const cell = ws.getCell(r, col);
+      cell.value = null;
+    }
     ws.getCell(r, descCol).value = item.extractedInfo;
     if (item.unit) ws.getCell(r, UNIT_COL).value = item.unit;
     if (cfg.extraCols) {
-      for (const { col, compute } of cfg.extraCols) {
-        const val = compute(item);
-        if (val !== null && val !== undefined) ws.getCell(r, col).value = val;
+      for (const { col, compute, styleCompute } of cfg.extraCols) {
+        const cell = ws.getCell(r, col);
+        const val = compute(item, r);
+        if (val !== null && val !== undefined) cell.value = val;
+        if (styleCompute) {
+          const font = styleCompute(item);
+          // Assigning cell.font alone on a still-default (never individually
+          // styled) cell can bleed into OTHER untouched cells that happen to
+          // share that same default style reference in ExcelJS — confirmed
+          // via direct reproduction. Assigning the whole .style object (not
+          // just .font) forces this cell onto its own independent style
+          // record instead, avoiding cross-cell contamination.
+          if (font) cell.style = Object.assign({}, cell.style, { font: Object.assign({}, cell.font, font) });
+        }
       }
     }
   });
@@ -476,12 +491,179 @@ function decathlonConsumptionValue(r) {
   return n;
 }
 
-// Fills one already-loaded "Format" worksheet with one R3's (deduped) data.
+/* ============================================================
+   PRICING ENGINE (Component supplier / Unit price / Api marker)
+   ============================================================ */
+
+// Known flat-rate categories — identified purely by Part-name keyword, and
+// these ALWAYS win over a price-file lookup (no DSM/Item Code match needed
+// at all) per current business rule. Order matters: the combined
+// "Size+Care" check must be tried before the standalone Size/Care checks,
+// though each standalone check also explicitly excludes the other keyword
+// as a second safeguard.
+const DECATHLON_FLAT_RATES = [
+  // Thread (incl. Bartack, which shares the same thread material but
+  // doesn't say "thread" in its own Part name) and Thread Textured (a
+  // different DSM, still thread) — all covered by isDecathlonThreadPart.
+  { test: r => isDecathlonThreadPart(r.part) || /bartack/i.test(r.part || ''), price: 0.00054, supplier: 'Coats BD' },
+  { test: r => /rfid/i.test(r.part || ''), price: 0.055, supplier: 'Checkpoint' },
+  { test: r => /size/i.test(r.part || '') && /care/i.test(r.part || '') && /label/i.test(r.part || ''), price: 0.058, supplier: 'Blazon' },
+  { test: r => /size/i.test(r.part || '') && /label/i.test(r.part || '') && !/care/i.test(r.part || ''), price: 0.014, supplier: 'Blazon' },
+  { test: r => /care/i.test(r.part || '') && /label/i.test(r.part || '') && !/size/i.test(r.part || ''), price: 0.044, supplier: 'Blazon' },
+  // Handles both "traceability" and the tech pack's own "TRACABILITY" spelling.
+  { test: r => /trac\w*abilit/i.test(r.part || ''), price: 0.014, supplier: 'Snowtex' },
+  // Interlining is a Fabrics-section item and gets priced despite the
+  // otherwise blanket "no pricing in Fabrics" rule — confirmed exception.
+  { test: r => /interlining/i.test(r.part || ''), price: 0.23, supplier: 'Osman' },
+];
+function decathlonFlatRateFor(r) {
+  return DECATHLON_FLAT_RATES.find(f => f.test(r)) || null;
+}
+
+function decathlonNormalizeOrigin(s) {
+  const t = (s || '').toString().trim().toLowerCase();
+  if (t.startsWith('bangla')) return 'bangladesh';
+  if (t.includes('china') || t === 'prc') return 'china';
+  if (t.includes('vietnam') || t.includes('viet nam')) return 'vietnam';
+  return t;
+}
+function decathlonNormalizeCurrency(s) {
+  const t = (s || '').toString().trim().toLowerCase();
+  if (t === 'usd' || t === 'us$' || t === '$') return 'usd';
+  if (t === 'cny' || t === 'rmb' || t === '¥') return 'cny';
+  return t;
+}
+
+// Builds a DSM+ItemCode -> [{origin, currency, price, supplier}] index from
+// the raw rows of the uploaded price list. Rows missing DSM, Item Code, or
+// a parseable price are skipped.
+function buildDecathlonPriceIndex(rawRows) {
+  const idx = new Map();
+  for (const row of rawRows) {
+    const dsm = (row.dsm || '').toString().trim();
+    const itemCode = (row.itemCode || '').toString().trim();
+    const price = parseFloat(row.price);
+    if (!dsm || !itemCode || isNaN(price)) continue;
+    const key = dsm + '\u0001' + itemCode;
+    const entry = {
+      origin: decathlonNormalizeOrigin(row.origin),
+      currency: decathlonNormalizeCurrency(row.currency),
+      price,
+      supplier: (row.supplier || '').toString().trim(),
+    };
+    if (!idx.has(key)) idx.set(key, []);
+    idx.get(key).push(entry);
+  }
+  return idx;
+}
+
+const DECATHLON_CNY_TO_USD = 0.15;
+const DECATHLON_REGION_PRIORITY = ['bangladesh', 'china', 'vietnam'];
+
+// Looks up a DSM+ItemCode pair in the price index, walking regions in
+// priority order (Bangladesh -> China -> Vietnam) and, within each region,
+// preferring a USD-priced row over a CNY-priced one (converted at 0.15).
+// Returns { price, supplier, region } or null if no match anywhere.
+function decathlonLookupPrice(priceIndex, dsm, itemCode) {
+  if (!priceIndex) return null;
+  const key = (dsm || '').toString().trim() + '\u0001' + (itemCode || '').toString().trim();
+  const entries = priceIndex.get(key);
+  if (!entries || !entries.length) return null;
+  for (const region of DECATHLON_REGION_PRIORITY) {
+    const regionEntries = entries.filter(e => e.origin === region);
+    if (!regionEntries.length) continue;
+    const usd = regionEntries.find(e => e.currency === 'usd');
+    if (usd) return { price: usd.price, supplier: usd.supplier, region };
+    const cny = regionEntries.find(e => e.currency === 'cny');
+    if (cny) return { price: Math.round(cny.price * DECATHLON_CNY_TO_USD * 1e6) / 1e6, supplier: cny.supplier, region };
+  }
+  return null;
+}
+
+const DECATHLON_RED_FONT = { color: { argb: 'FFCC0000' } };
+const DECATHLON_DEFAULT_FONT = { color: { argb: 'FF000000' } };
+
+// Decides what (if anything) goes in Component supplier / Unit price / Api
+// marker for one extracted row. Returns null when the row should be left
+// completely untouched (non-Interlining Fabrics rows — rule 3).
+//  1. Fabrics (except Interlining) -> untouched.
+//  2. Flat-rate categories (rule 10) -> always win, no price-file lookup.
+//  3. No DSM code -> "DSM is missing" in red, no price.
+//  4. DSM+Item Code price-file lookup, Bangladesh -> China -> Vietnam,
+//     USD preferred over CNY (converted). No match anywhere -> "Price not
+//     found" in red.
+//  5. A match sourced from China or Vietnam gets an Api marker formula
+//     (Total Local price * 15%); Bangladesh does not.
+function computeDecathlonPricing(r, sectionName, priceIndex) {
+  const isFabric = sectionName === 'Fabrics';
+  const isInterlining = /interlining/i.test(r.part || '');
+  if (isFabric && !isInterlining) return null;
+
+  const flat = decathlonFlatRateFor(r);
+  if (flat) {
+    return { supplierText: flat.supplier, isError: false, unitPrice: flat.price, needsApiMarker: false };
+  }
+
+  if (!r.dsm) {
+    return { supplierText: 'DSM is missing', isError: true, unitPrice: null, needsApiMarker: false };
+  }
+
+  const found = decathlonLookupPrice(priceIndex, r.dsm, r.itemCode);
+  if (!found) {
+    return { supplierText: 'Price not found', isError: true, unitPrice: null, needsApiMarker: false };
+  }
+  return {
+    supplierText: found.supplier,
+    isError: false,
+    unitPrice: found.price,
+    needsApiMarker: found.region !== 'bangladesh',
+  };
+}
+
+// Parses the uploaded price list (large flat table: DSM Code, Item Code,
+// Price, Unit, Currency, Supplier, Origin) into raw row objects for
+// buildDecathlonPriceIndex. Uses array-of-arrays mode (faster than SheetJS's
+// default object mode) since the file can be hundreds of thousands of rows.
+// Column order isn't assumed — matched by header text so a reordered sheet
+// still works.
+async function parseDecathlonPriceFile(file) {
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(buf, { type: 'array' });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
+  if (!aoa.length) return [];
+  const header = aoa[0].map(h => (h || '').toString().trim().toLowerCase());
+  const idxOf = name => header.indexOf(name);
+  const c = {
+    dsm: idxOf('dsm code'),
+    itemCode: idxOf('item code'),
+    price: idxOf('price'),
+    unit: idxOf('unit'),
+    currency: idxOf('currency'),
+    supplier: idxOf('supplier'),
+    origin: idxOf('origin'),
+  };
+  const missing = Object.entries(c).filter(([, i]) => i === -1).map(([k]) => k);
+  if (missing.length) throw new Error(`Price list is missing expected column(s): ${missing.join(', ')}`);
+
+  const rows = [];
+  for (let i = 1; i < aoa.length; i++) {
+    const row = aoa[i];
+    if (!row || !row.length) continue;
+    rows.push({
+      dsm: row[c.dsm], itemCode: row[c.itemCode], price: row[c.price],
+      unit: row[c.unit], currency: row[c.currency], supplier: row[c.supplier], origin: row[c.origin],
+    });
+  }
+  return rows;
+}
+
+
 // r3List is the full set of R3 numbers that share this exact BOM (see
 // buildMultiCCCostBreakDown) — when there's more than one, they all go into
 // the R3 cell together, comma-separated, instead of getting separate tabs.
 // Returns per-section item counts.
-function fillDecathlonWorksheet(ws, extracted, r3List) {
+function fillDecathlonWorksheet(ws, extracted, r3List, priceIndex) {
   const { productName, ccNumber, r3, sections } = extracted;
   let maxRow = ws.rowCount;
   normalizeFormulas(ws, maxRow, 27);
@@ -518,11 +700,28 @@ function fillDecathlonWorksheet(ws, extracted, r3List) {
       // skips writing when qty is null/undefined). Every other section
       // gets its normal consumption, with a 2% uplift on "pce" units.
       qty: isFabric ? null : decathlonConsumptionValue(r),
+      // null for non-Interlining Fabrics rows -> supplier/price/Api marker
+      // extraCols below all no-op for those, leaving the cells untouched.
+      pricing: computeDecathlonPricing(r, sectionName, priceIndex),
     }));
   };
   const extraCols = [
     { col: 1, compute: it => it.type },
     { col: 12, compute: it => it.qty }, // null/undefined -> cell left untouched
+    {
+      col: 6, // Component supplier — supplier name, or a "DSM is missing" /
+               // "Price not found" comment in red when pricing failed.
+      compute: it => (it.pricing ? it.pricing.supplierText : null),
+      styleCompute: it => (it.pricing ? (it.pricing.isError ? DECATHLON_RED_FONT : DECATHLON_DEFAULT_FONT) : null),
+    },
+    {
+      col: 9, // Unit price — always a real number, never text.
+      compute: it => (it.pricing && it.pricing.unitPrice !== null && it.pricing.unitPrice !== undefined) ? it.pricing.unitPrice : null,
+    },
+    {
+      col: 22, // Api marker — formula, only for China/Vietnam-sourced prices.
+      compute: (it, r) => (it.pricing && it.pricing.needsApiMarker) ? { formula: `S${r}*0.15` } : null,
+    },
   ];
 
   // Bottom-to-top through the sheet so inserting rows in a lower section
@@ -595,7 +794,7 @@ function cloneWorksheetInto(targetWorkbook, sourceWs, newName) {
 //    that same CC is treated as a duplicate BOM and is not written anywhere
 //  - ccSessions: [{ ccNumber, r3DataList: [...] }, ...] — one entry per
 //    uploaded tech pack
-async function buildMultiCCCostBreakDown(templateArrayBuffer, ccSessions) {
+async function buildMultiCCCostBreakDown(templateArrayBuffer, ccSessions, priceIndex) {
   const mainWorkbook = new ExcelJS.Workbook();
   await mainWorkbook.xlsx.load(templateArrayBuffer.slice(0));
   let reusableWs = mainWorkbook.getWorksheet('Format'); // consumed once, for the very first tab overall
@@ -647,7 +846,7 @@ async function buildMultiCCCostBreakDown(templateArrayBuffer, ccSessions) {
       const primaryData = group.entries[0].data;
 
       const { ws, isNew } = await getFreshWorksheet();
-      const counts = fillDecathlonWorksheet(ws, primaryData, r3List);
+      const counts = fillDecathlonWorksheet(ws, primaryData, r3List, priceIndex);
       if (isNew) {
         cloneWorksheetInto(mainWorkbook, ws, sheetName);
       } else {
@@ -725,6 +924,11 @@ const cbdStatusDec = document.getElementById('cbdStatusDec');
 let currentFileDec = null;
 let currentDecResults = null;   // array of extracted+deduped R3 data for the tech pack in progress
 let ccSessions = [];            // banked sessions: [{ ccNumber, r3DataList }, ...]
+let decathlonPriceIndex = null; // DSM+ItemCode -> price entries, built once per session from the uploaded price list
+let decathlonPriceRowCount = 0;
+
+const priceFileInputDec = document.getElementById('priceFileInputDec');
+const priceStatusDec = document.getElementById('priceStatusDec');
 
 function parseR3List(raw) {
   return [...new Set((raw || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean))];
@@ -783,6 +987,28 @@ clearFileDec.addEventListener('click', e => {
   resetUploadFormDec();
 });
 r3Input.addEventListener('input', updateProcessBtnDec);
+
+if (priceFileInputDec) {
+  priceFileInputDec.addEventListener('change', async e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    priceStatusDec.textContent = 'Parsing price list…';
+    priceStatusDec.className = 'status';
+    try {
+      const rawRows = await parseDecathlonPriceFile(file);
+      decathlonPriceIndex = buildDecathlonPriceIndex(rawRows);
+      decathlonPriceRowCount = rawRows.length;
+      priceStatusDec.textContent = `Price list loaded — ${decathlonPriceRowCount.toLocaleString()} rows indexed (${file.name})`;
+      priceStatusDec.className = 'status ok';
+    } catch (err) {
+      console.error(err);
+      decathlonPriceIndex = null;
+      decathlonPriceRowCount = 0;
+      priceStatusDec.textContent = 'Could not read price list: ' + err.message;
+      priceStatusDec.className = 'status err';
+    }
+  });
+}
 
 function setStatusDec(msg, cls) {
   statusDec.textContent = msg;
@@ -843,6 +1069,10 @@ addAnotherCcBtn.addEventListener('click', () => {
 
 cbdBtnDec.addEventListener('click', async () => {
   if (ccSessions.length === 0) return;
+  if (!decathlonPriceIndex) {
+    const proceed = confirm('No price list loaded — Unit Price will be left blank (except flat-rate items like thread/labels/RFID/interlining). Continue anyway?');
+    if (!proceed) return;
+  }
   cbdBtnDec.disabled = true;
   cbdBtnDec.classList.add('loading');
   cbdLabelDec.textContent = 'Building Costing file...';
@@ -850,7 +1080,7 @@ cbdBtnDec.addEventListener('click', async () => {
   cbdStatusDec.className = 'status';
   try {
     const templateBuffer = base64ToArrayBuffer(DECATHLON_TEMPLATE_B64);
-    const { buffer, report } = await buildMultiCCCostBreakDown(templateBuffer, ccSessions);
+    const { buffer, report } = await buildMultiCCCostBreakDown(templateBuffer, ccSessions, decathlonPriceIndex);
     const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
