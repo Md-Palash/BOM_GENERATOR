@@ -345,6 +345,7 @@ body{
   background:var(--mark-bg, var(--accent));
   letter-spacing:-0.02em;
 }
+.brand-card-mark svg{ width:30px; height:30px; }
 .brand-card-name{
   font-weight:700; font-size:16px; letter-spacing:.01em; color:var(--primary);
 }
