@@ -285,6 +285,16 @@ function decathlonRowSignature(r) {
     .join('\u0001');
 }
 
+// A row with no real content at all — every identifying field blank. This
+// is a PDF-parsing artifact (e.g. a stray blank line misread as a new row)
+// rather than a real BOM item. Filtered out before dedupe/pricing so it
+// never occupies a sheet row or picks up a spurious "DSM is missing"
+// comment — previously, unused section capacity beyond the real item count
+// could get a ghost row like this written into it.
+function isDecathlonGhostRow(r) {
+  return [r.part, r.dsm, r.itemCode, r.component, r.gridValue].every(v => !v || !v.toString().trim());
+}
+
 // Dedupe rules (per business logic):
 //  - Fabrics: a row is a duplicate only if BOTH its DSM code and its Item
 //    Code match a row already kept — keep the first occurrence, drop the rest.
@@ -302,6 +312,14 @@ function decathlonRowSignature(r) {
 //    regardless of DSM/Part — which one survives doesn't matter. This takes
 //    priority over both rules above.
 function dedupeDecathlonSections(sections) {
+  // Ghost rows (no real content) never make it in, in any section.
+  for (const name of Object.keys(sections)) {
+    sections[name] = (sections[name] || []).filter(r => !isDecathlonGhostRow(r));
+  }
+  // "Box" items in Sales Packaging are skipped entirely per current
+  // business rule.
+  sections['Sales Packaging'] = (sections['Sales Packaging'] || []).filter(r => !/\bbox\b/i.test(r.part || ''));
+
   const seenFab = new Set();
   sections.Fabrics = (sections.Fabrics || []).filter(r => {
     const key = (r.dsm || '') + '\u0001' + (r.itemCode || '');
@@ -501,6 +519,15 @@ function decathlonConsumptionValue(r) {
 // "Size+Care" check must be tried before the standalone Size/Care checks,
 // though each standalone check also explicitly excludes the other keyword
 // as a second safeguard.
+// Interlining is sometimes labeled something else entirely in the Part
+// column (e.g. "Thermofusing"), so it's identified by the constructed
+// Designation text (which pulls in Component, e.g. "INTERLINING RPET/PET
+// 55G / 160 CM") instead of Part — the material description reliably says
+// "interlining" even when the Part/Type name doesn't.
+function decathlonIsInterlining(r) {
+  return /interlining/i.test(decathlonDesignation(r) || '');
+}
+
 const DECATHLON_FLAT_RATES = [
   // Thread (incl. Bartack, which shares the same thread material but
   // doesn't say "thread" in its own Part name) and Thread Textured (a
@@ -514,7 +541,7 @@ const DECATHLON_FLAT_RATES = [
   { test: r => /trac\w*abilit/i.test(r.part || ''), price: 0.014, supplier: 'Snowtex' },
   // Interlining is a Fabrics-section item and gets priced despite the
   // otherwise blanket "no pricing in Fabrics" rule — confirmed exception.
-  { test: r => /interlining/i.test(r.part || ''), price: 0.23, supplier: 'Osman' },
+  { test: r => decathlonIsInterlining(r), price: 0.23, supplier: 'Osman' },
 ];
 function decathlonFlatRateFor(r) {
   return DECATHLON_FLAT_RATES.find(f => f.test(r)) || null;
@@ -596,7 +623,7 @@ const DECATHLON_DEFAULT_FONT = { color: { argb: 'FF000000' } };
 //     (Total Local price * 15%); Bangladesh does not.
 function computeDecathlonPricing(r, sectionName, priceIndex) {
   const isFabric = sectionName === 'Fabrics';
-  const isInterlining = /interlining/i.test(r.part || '');
+  const isInterlining = decathlonIsInterlining(r);
   if (isFabric && !isInterlining) return null;
 
   const flat = decathlonFlatRateFor(r);
@@ -630,7 +657,12 @@ async function parseDecathlonPriceFile(file) {
   const buf = await file.arrayBuffer();
   const wb = XLSX.read(buf, { type: 'array' });
   const ws = wb.Sheets[wb.SheetNames[0]];
-  const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
+  // raw:false reads each cell's formatted display text rather than its raw
+  // numeric value — DSM/Item codes are ID-like strings, and reading them as
+  // numbers risks silent reinterpretation (e.g. dropped leading zeros) if
+  // Excel happens to store them as a numeric type. Price still parses fine
+  // as text via parseFloat downstream.
+  const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
   if (!aoa.length) return [];
   const header = aoa[0].map(h => (h || '').toString().trim().toLowerCase());
   const idxOf = name => header.indexOf(name);
@@ -665,7 +697,8 @@ async function parseDecathlonPriceFile(file) {
 // Returns per-section item counts.
 function fillDecathlonWorksheet(ws, extracted, r3List, priceIndex) {
   const { productName, ccNumber, r3, sections } = extracted;
-  let maxRow = ws.rowCount;
+  const originalRowCount = ws.rowCount;
+  let maxRow = originalRowCount;
   normalizeFormulas(ws, maxRow, 27);
 
   if (productName) ws.getCell('B1').value = productName;
@@ -734,6 +767,22 @@ function fillDecathlonWorksheet(ws, extracted, r3List, priceIndex) {
     counts[name] = rows.length;
     ({ maxSheetRow: maxRow } = fillSectionDecathlon(ws, cfg, toItems(rows, name), maxRow));
   }
+
+  // "Local Transport" (row 106, col I in the template) gets the sum of
+  // every Api marker formula written across the sheet (col V). Row 106 sits
+  // below every BOM section, so if any section needed row insertion it
+  // shifts down by the same cumulative amount as the sheet as a whole —
+  // computed here from how much maxRow grew versus the sheet's original
+  // row count. The sum range's top (row 11, the Fabrics header) never
+  // shifts since nothing sits above it; only the bottom does.
+  const totalRowShift = maxRow - originalRowCount;
+  const LOCAL_TRANSPORT_ROW = 106;
+  const API_MARKER_TOP_ROW = 11;
+  const API_MARKER_BOTTOM_ROW = 79; // Transport Packaging's total row, original coordinates
+  const localTransportRow = LOCAL_TRANSPORT_ROW + totalRowShift;
+  const apiMarkerBottomRow = API_MARKER_BOTTOM_ROW + totalRowShift;
+  ws.getCell(localTransportRow, 9).value = { formula: `SUM(V${API_MARKER_TOP_ROW}:V${apiMarkerBottomRow})` };
+
   return counts;
 }
 
