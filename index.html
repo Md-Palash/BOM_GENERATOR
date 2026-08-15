@@ -8,6 +8,17 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
 <link rel="stylesheet" href="css/styles.css">
+<style>
+  .hero-split-dec{display:flex;flex-wrap:wrap;gap:28px;}
+  .hero-split-dec>div{flex:1 1 280px;min-width:0;}
+  .hero-split-dec>.hero-right-dec{border-left:1.5px solid var(--border);padding-left:28px;}
+  @media (max-width:640px){
+    .hero-split-dec>.hero-right-dec{border-left:none;padding-left:0;border-top:1.5px solid var(--border);padding-top:20px;}
+  }
+  .dec-price-card{display:flex;flex-direction:column;gap:10px;justify-content:center;height:100%;}
+  .dec-price-upload-label{display:flex;align-items:center;justify-content:center;gap:8px;border:1.5px dashed var(--border);border-radius:12px;padding:14px 16px;font-family:var(--font);font-size:14px;cursor:pointer;text-align:center;transition:border-color .15s;}
+  .dec-price-upload-label:hover{border-color:#94a3b8;}
+</style>
 </head>
 <body>
 <div class="wrap">
@@ -231,16 +242,29 @@
     </button>
 
     <div class="card hero-card">
-      <div class="hero-top">
-        <div class="hero-copy">
-          <div class="badge"><span class="dot"></span>Decathlon BOM Utility</div>
-          <h1>Tech Pack <span class="arrow-glyph">→</span> Costing Sheet</h1>
+      <div class="hero-split-dec">
+        <div class="hero-left-dec">
+          <div class="hero-top">
+            <div class="hero-copy">
+              <div class="badge"><span class="dot"></span>Decathlon BOM Utility</div>
+              <h1>Tech Pack <span class="arrow-glyph">→</span> Costing Sheet</h1>
+            </div>
+            <div class="hero-pills">
+              <span class="pill">BOM</span>
+            </div>
+          </div>
         </div>
-        <div class="hero-pills">
-          <span class="pill">BOM</span>
+        <div class="hero-right-dec">
+          <div class="dec-price-card">
+            <div class="badge"><span class="dot"></span>Price List</div>
+            <label class="dec-price-upload-label" for="priceFileInputDec">
+              Upload Price List (.xlsx)
+              <input type="file" id="priceFileInputDec" accept=".xlsx,.xls" style="display:none;">
+            </label>
+            <div class="status" id="priceStatusDec" style="font-size:13px;">No price list loaded — Unit Price left blank except flat-rate items</div>
+          </div>
         </div>
       </div>
-      <p class="lede">Upload one Decathlon tech pack (one CC) and enter the R3 number(s) you want to cost from it. Once you're done with that CC you can add another tech pack, or finish and get one Excel file with a tab per CC (and per BOM variant within it).</p>
     </div>
 
     <div class="dropzone" id="dropzoneDec">
