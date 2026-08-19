@@ -949,11 +949,29 @@ function cloneWorksheetInto(workbook, sourceWs, newName, maxCol = 22){
   return newWs;
 }
 
+// Signature used to decide whether two Supply Chain Sheet rows are "the
+// same item" for dedup purposes: every displayed field except Style No,
+// normalized (trimmed + lowercased) so whitespace/case differences don't
+// defeat the match. Two rows with the same signature are the same
+// physical item regardless of which style(s) they were extracted from.
+function supplyRowSignature(...fields){
+  return fields.map(v => (v || '').toString().trim().toLowerCase()).join('\u0001');
+}
+
 // Builds the Supply Chain Sheet workbook: a plain two-tab file (no
 // template to preserve, unlike the Cost Break Down merge) - Fabric items
 // on one tab, everything else (Trim + Labels & Packaging) on the other.
 // `rows` is a flat list of raw extracted items, each already tagged with
 // its own tech pack's style number under `styleNo`.
+//
+// Exact-duplicate dedup: an item that appears more than once - whether
+// twice within the same style or once each in several different styles -
+// is written only once, under whichever style it was encountered under
+// first (rows arrive in upload order, so this is simply "first style
+// uploaded wins"). Every later exact match, same style or different, is
+// dropped entirely rather than written as its own row. No blank separator
+// row is written between styles anymore - the sheet is just the deduped
+// row list, one item per row.
 async function buildSupplyChainWorkbook(rows){
   const workbook = new ExcelJS.Workbook();
   const fabricWs = workbook.addWorksheet('Fabric');
@@ -978,24 +996,28 @@ async function buildSupplyChainWorkbook(rows){
     ws.views = [{ state: 'frozen', ySplit: 1 }];
   });
 
-  // A blank row separates one tech pack's block of rows from the next -
-  // tracked independently per sheet, since a style might only produce rows
-  // on one of the two tabs.
-  let lastFabricStyle = null;
-  let lastTrimsStyle = null;
+  const seenFabric = new Set();
+  const seenTrims = new Set();
+  let fabricWritten = 0, trimsWritten = 0;
+
   rows.forEach(r => {
     if (r.section === 'Fabric'){
-      if (lastFabricStyle !== null && r.styleNo !== lastFabricStyle) fabricWs.addRow({});
+      const key = supplyRowSignature(r.internalCode, r.extractedInfo, r.supplier);
+      if (seenFabric.has(key)) return; // exact duplicate of an already-written item - skip
+      seenFabric.add(key);
       fabricWs.addRow({ style: r.styleNo || '', code: r.internalCode || '', desc: r.extractedInfo || '', supplier: r.supplier || '' });
-      lastFabricStyle = r.styleNo;
+      fabricWritten++;
     } else if (r.section === 'Trim' || r.section === 'Labels & packaging'){
-      if (lastTrimsStyle !== null && r.styleNo !== lastTrimsStyle) trimsWs.addRow({});
+      const key = supplyRowSignature(r.itemName, r.internalCode, r.extractedInfo, r.supplier);
+      if (seenTrims.has(key)) return; // exact duplicate of an already-written item - skip
+      seenTrims.add(key);
       trimsWs.addRow({ style: r.styleNo || '', name: r.itemName || '', code: r.internalCode || '', desc: r.extractedInfo || '', supplier: r.supplier || '' });
-      lastTrimsStyle = r.styleNo;
+      trimsWritten++;
     }
   });
 
-  return await workbook.xlsx.writeBuffer();
+  const buffer = await workbook.xlsx.writeBuffer();
+  return { buffer, fabricWritten, trimsWritten };
 }
 
 async function mergeIntoCostBreakDown(templateArrayBuffer, extractedItems, productImage, headerInfo) {
@@ -1491,12 +1513,15 @@ processBtnSupply.addEventListener('click', async ()=>{
     if (allRows.length === 0){
       setStatusEl(statusSupply, 'No matching Fabric / Trim / Labels & Packaging grids were found in these PDFs.', 'err');
     } else {
-      currentSupplyBuffer = await buildSupplyChainWorkbook(allRows);
-      const fabricCount = allRows.filter(r => r.section === 'Fabric').length;
-      const trimsCount = allRows.length - fabricCount;
-      countsSupply.textContent = `Fabric: ${fabricCount} | Trims: ${trimsCount} | Total: ${allRows.length} rows across ${currentSupplyFiles.length} tech pack(s).`;
+      const { buffer, fabricWritten, trimsWritten } = await buildSupplyChainWorkbook(allRows);
+      currentSupplyBuffer = buffer;
+      const writtenTotal = fabricWritten + trimsWritten;
+      const duplicatesSkipped = allRows.length - writtenTotal;
+      countsSupply.textContent = `Fabric: ${fabricWritten} | Trims: ${trimsWritten} | Total: ${writtenTotal} unique row(s) across ${currentSupplyFiles.length} tech pack(s)` +
+        (duplicatesSkipped ? ` (${duplicatesSkipped} duplicate${duplicatesSkipped === 1 ? '' : 's'} skipped).` : '.');
       resultsSupply.classList.add('show');
-      setStatusEl(statusSupply, `Done — ${allRows.length} items extracted from ${currentSupplyFiles.length} tech pack(s).`, 'ok');
+      setStatusEl(statusSupply, `Done — ${writtenTotal} unique item(s) written from ${currentSupplyFiles.length} tech pack(s)` +
+        (duplicatesSkipped ? `, ${duplicatesSkipped} duplicate${duplicatesSkipped === 1 ? '' : 's'} skipped.` : '.'), 'ok');
     }
   } catch(err){
     console.error(err);
