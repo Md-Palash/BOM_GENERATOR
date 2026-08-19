@@ -339,7 +339,16 @@ function mergeZipperItems(results){
             // driven by the first chosen part's own Quantity (normally the
             // teeth, since that's what's present in virtually every group).
             _quantity: chosen[0] ? chosen[0]._quantity : '',
-            _columnHeader: chosen.map(g=>g._columnHeader).filter(Boolean).join(' '),
+            // One physical slot has one printed heading (e.g. "CF ZIPPER"),
+            // even though its teeth/tape/puller parts sit in separate PDF
+            // columns that may each pick up their own fragment of header
+            // text. Prefer the group's first-encountered part's header
+            // (leftmost column, where the shared heading is most often
+            // printed); fall back to the first non-blank header found
+            // anywhere else in the group rather than concatenating every
+            // part's header together, which would read as a run-on mess.
+            _columnHeader: (r._columnHeader && r._columnHeader.trim())
+              || ((chosen.find(g => g._columnHeader && g._columnHeader.trim()) || {})._columnHeader || ''),
           });
         }
         i = j;
@@ -356,8 +365,13 @@ function stripInternalFields(results){
   // _sizeScale, _quantity, _groupKey, and _fabricColorways are intentionally
   // kept - mergeIntoCostBreakDown uses them to route items into the
   // correct size tab(s), compute the +5% consumption value, and collapse
-  // colorway-variant duplicate columns down to one per slot.
-  return results.map(({ _type, _name, _columnHeader, ...rest }) => rest);
+  // colorway-variant duplicate columns down to one per slot. _columnHeader
+  // is kept too (renamed to the public field `columnHeader`) - the Supply
+  // Chain Sheet's Trims tab uses it as the displayed "Item name" (the
+  // heading printed above the item's own column in the tech pack, e.g.
+  // "CF ZIPPER"), rather than the item's own descriptive Name field value
+  // (e.g. "#5 OPEN END VISLON"). Unused by the BOM / Cost Break Down path.
+  return results.map(({ _type, _name, _columnHeader, ...rest }) => ({ ...rest, columnHeader: (_columnHeader || '').trim() }));
 }
 
 // Fixed placement (in PDF points, page 1) of the product sketch image in
@@ -497,10 +511,14 @@ async function extractPdf(file, onProgress){
 }
 
 // Supply Chain Sheet extraction - reuses the same per-column field parsing
-// as extractPdf, but skips the BOM-specific cleanup steps (Canada
-// filtering, zipper-part merging, colorway/group dedup) since the Supply
-// Chain Sheet lists every extracted column as its own row. No product
-// image is needed here either.
+// as extractPdf. Zipper-part merging IS applied here (same as the BOM
+// path - teeth/tape/puller collapse into one combined row per size
+// grouping, with Item code becoming e.g. "T0047 + T0356 + T0560A"), run
+// per file/tech pack since the merge relies on rows still being in their
+// original consecutive PDF order. Canada filtering and the BOM's
+// colorway/group-key dedup are still skipped here - the Supply Chain
+// Sheet's own dedup (buildSupplyChainWorkbook) operates on exact-row
+// matches instead. No product image is needed here either.
 async function extractPdfRaw(file, onProgress){
   const arrayBuffer = await file.arrayBuffer();
   const doc = await pdfjsLib.getDocument({data: new Uint8Array(arrayBuffer)}).promise;
@@ -517,6 +535,7 @@ async function extractPdfRaw(file, onProgress){
     const res = extractFromPageItems(items, p);
     if (res) all = all.concat(res);
   }
+  all = mergeZipperItems(all);
   return { items: stripInternalFields(all), headerInfo };
 }
 
@@ -962,7 +981,19 @@ function supplyRowSignature(...fields){
 // template to preserve, unlike the Cost Break Down merge) - Fabric items
 // on one tab, everything else (Trim + Labels & Packaging) on the other.
 // `rows` is a flat list of raw extracted items, each already tagged with
-// its own tech pack's style number under `styleNo`.
+// its own tech pack's style number under `styleNo`, and already
+// zipper-merged per file (see extractPdfRaw).
+//
+// Layout: Fabric has a blank spacer column between Style No/Fabric Code
+// and another between Description/Supplier; Trims has one blank spacer
+// column between Description/Supplier. These are pure visual gaps - never
+// written to - added on request for manual notes/spacing.
+//
+// Trims "Item name" is the column HEADING text printed above the item's
+// own column in the tech pack (e.g. "CF ZIPPER"), not the item's own
+// descriptive Name field (e.g. "#5 OPEN END VISLON"). If a row's heading
+// couldn't be read at all (extraction miss), it falls back to the Name
+// field rather than leaving the cell blank in a real deliverable file.
 //
 // Exact-duplicate dedup: an item that appears more than once - whether
 // twice within the same style or once each in several different styles -
@@ -970,8 +1001,7 @@ function supplyRowSignature(...fields){
 // first (rows arrive in upload order, so this is simply "first style
 // uploaded wins"). Every later exact match, same style or different, is
 // dropped entirely rather than written as its own row. No blank separator
-// row is written between styles anymore - the sheet is just the deduped
-// row list, one item per row.
+// row is written between styles - the sheet is just the deduped row list.
 async function buildSupplyChainWorkbook(rows){
   const workbook = new ExcelJS.Workbook();
   const fabricWs = workbook.addWorksheet('Fabric');
@@ -979,8 +1009,10 @@ async function buildSupplyChainWorkbook(rows){
 
   fabricWs.columns = [
     { header: 'Style No', key: 'style', width: 20 },
+    { header: '', key: 'blank1', width: 3 },
     { header: 'Fabric Code', key: 'code', width: 18 },
     { header: 'Description', key: 'desc', width: 75 },
+    { header: '', key: 'blank2', width: 3 },
     { header: 'Supplier', key: 'supplier', width: 24 },
   ];
   trimsWs.columns = [
@@ -988,6 +1020,7 @@ async function buildSupplyChainWorkbook(rows){
     { header: 'Item name', key: 'name', width: 28 },
     { header: 'Item code', key: 'code', width: 18 },
     { header: 'Description', key: 'desc', width: 75 },
+    { header: '', key: 'blank1', width: 3 },
     { header: 'Supplier', key: 'supplier', width: 24 },
   ];
   [fabricWs, trimsWs].forEach(ws => {
@@ -1008,10 +1041,11 @@ async function buildSupplyChainWorkbook(rows){
       fabricWs.addRow({ style: r.styleNo || '', code: r.internalCode || '', desc: r.extractedInfo || '', supplier: r.supplier || '' });
       fabricWritten++;
     } else if (r.section === 'Trim' || r.section === 'Labels & packaging'){
-      const key = supplyRowSignature(r.itemName, r.internalCode, r.extractedInfo, r.supplier);
+      const displayName = (r.columnHeader && r.columnHeader.trim()) || r.itemName || '';
+      const key = supplyRowSignature(displayName, r.internalCode, r.extractedInfo, r.supplier);
       if (seenTrims.has(key)) return; // exact duplicate of an already-written item - skip
       seenTrims.add(key);
-      trimsWs.addRow({ style: r.styleNo || '', name: r.itemName || '', code: r.internalCode || '', desc: r.extractedInfo || '', supplier: r.supplier || '' });
+      trimsWs.addRow({ style: r.styleNo || '', name: displayName, code: r.internalCode || '', desc: r.extractedInfo || '', supplier: r.supplier || '' });
       trimsWritten++;
     }
   });
