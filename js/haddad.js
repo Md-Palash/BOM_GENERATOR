@@ -970,11 +970,18 @@ function cloneWorksheetInto(workbook, sourceWs, newName, maxCol = 22){
 
 // Signature used to decide whether two Supply Chain Sheet rows are "the
 // same item" for dedup purposes: every displayed field except Style No,
-// normalized (trimmed + lowercased) so whitespace/case differences don't
-// defeat the match. Two rows with the same signature are the same
-// physical item regardless of which style(s) they were extracted from.
+// normalized down to just its letters/digits (lowercased, with every
+// space, comma, hyphen, semicolon, period, slash, and other punctuation
+// stripped out entirely) so two rows that only differ in spacing or
+// punctuation - e.g. "T0047, D01" vs "T0047 - D01" vs "T0047D01" - still
+// count as the exact same item. Two rows with the same signature are the
+// same physical item regardless of which style(s) they were extracted
+// from.
+function supplyNormalizeForSignature(v){
+  return (v || '').toString().toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
 function supplyRowSignature(...fields){
-  return fields.map(v => (v || '').toString().trim().toLowerCase()).join('\u0001');
+  return fields.map(supplyNormalizeForSignature).join('\u0001');
 }
 
 // Builds the Supply Chain Sheet workbook: a plain two-tab file (no
