@@ -143,6 +143,7 @@ async function extractKaribanPlacementRows(file, onProgress) {
   let currentReportType = null;
   let styleCode = '';
   let styleDesignation = '';
+  let styleBrand = '';
 
   for (let p = 1; p <= pdf.numPages; p++) {
     onProgress && onProgress(p, pdf.numPages);
@@ -176,6 +177,16 @@ async function extractKaribanPlacementRows(file, onProgress) {
         const valTok = items.filter(it => Math.abs(it.y - desigLabel.y) <= 3 && it.x > desigLabel.x + 20)
           .sort((a, b) => a.x - b.x);
         styleDesignation = valTok.map(t => t.str.trim()).join(' ').trim();
+      }
+      // Brand - read the same way as Style/Designation above, from
+      // whichever label token on page 1's Properties table matches "Brand".
+      // Left blank (same fallback as the two fields above) if this exact
+      // label text isn't found on this tech pack's page 1.
+      const brandLabel = items.find(it => normKariban(it.str) === 'Brand');
+      if (brandLabel) {
+        const valTok = items.filter(it => Math.abs(it.y - brandLabel.y) <= 3 && it.x > brandLabel.x + 20)
+          .sort((a, b) => a.x - b.x);
+        styleBrand = valTok.map(t => t.str.trim()).join(' ').trim();
       }
     }
 
@@ -253,7 +264,7 @@ async function extractKaribanPlacementRows(file, onProgress) {
     }
   }
 
-  return { rows: results, styleCode, styleDesignation };
+  return { rows: results, styleCode, styleDesignation, brand: styleBrand };
 }
 
 /* ============================================================
@@ -564,6 +575,17 @@ function fillKaribanSection(ws, cfg, items, maxSheetRow) {
   const oldMerges = snapshotAndUnmergeAllKariban(ws);
   const rowTemplateMerges = oldMerges.filter(m => m.minRow === first).map(m => ({ minCol: m.minCol, maxCol: m.maxCol }));
 
+  // Formula columns this section's own template row actually carries (e.g.
+  // Fabric's FOB/CNF block in P/R/S, Label & Trim's single FOB-multiplier
+  // column O) - detected dynamically off the template's own last row
+  // rather than hardcoded to just Total Cost, so every section's real
+  // formula columns get carried onto a newly inserted row exactly like M
+  // already was.
+  const templateFormulaCols = [];
+  for (let c = 1; c <= KARIBAN_MAX_COL; c++) {
+    if (getFormulaKariban(ws.getCell(last, c))) templateFormulaCols.push(numToColLetterKariban(c));
+  }
+
   let insertAt = null;
   if (amount > 0) {
     insertAt = last;
@@ -573,7 +595,7 @@ function fillKaribanSection(ws, cfg, items, maxSheetRow) {
     for (let i = 0; i < amount; i++) {
       const newRow = insertAt + i;
       copyRowStyleKariban(ws, insertAt + amount, newRow, KARIBAN_MAX_COL);
-      copyRowFormulasKariban(ws, insertAt + amount, newRow, KARIBAN_FORMULA_COLS);
+      copyRowFormulasKariban(ws, insertAt + amount, newRow, templateFormulaCols.length ? templateFormulaCols : KARIBAN_FORMULA_COLS);
     }
     maxSheetRow += amount;
     last += amount;
@@ -586,23 +608,26 @@ function fillKaribanSection(ws, cfg, items, maxSheetRow) {
   // Consumption cell fills, and occasionally a stray formula someone used
   // to type in a data value like "=110/36" for Consumption...). Every one
   // of those belongs to that old style, not this one, so the whole row is
-  // wiped clean first - EXCEPT column M, whose "(K+K*L)*J" formula is the
-  // one truly structural, present-on-every-row calculation that makes the
-  // sheet's Total Cost actually work; it must never be cleared or
-  // overwritten, only ever left to recompute from this row's own K/L/J.
+  // wiped clean first - EXCEPT any cell that already holds a formula
+  // (Total Cost, plus this section's own FOB/CNF formulas where present -
+  // see templateFormulaCols above): those must keep calculating from this
+  // row's own inputs, never be nulled out. Every cell that IS cleared also
+  // gets reset to General number format, so a leftover Accounting/Currency
+  // format inherited from the template's old example data (or copied onto
+  // a newly inserted row) can't force too-narrow-for-its-symbol display
+  // into "#####" once real data lands in it - this was most visible on
+  // merged zipper rows, whose combined code/description text sits in the
+  // same row as that inherited formatting.
   const NO_FILL = { type: 'pattern', pattern: 'none' };
   for (let r = first; r <= last; r++) {
     for (let c = 1; c <= KARIBAN_MAX_COL; c++) {
-      if (c === KARIBAN_TOTAL_COST_COL) continue;
-      ws.getCell(r, c).value = null;
+      const cell = ws.getCell(r, c);
+      if (getFormulaKariban(cell)) continue;
+      cell.value = null;
+      cell.numFmt = 'General';
     }
     ws.getCell(r, KARIBAN_PRICE_COL).fill = NO_FILL;
     ws.getCell(r, KARIBAN_CONSUMPTION_COL).fill = NO_FILL;
-    // the template's leftover per-row unit-suffixed/accounting-style
-    // formats (e.g. 0.00 "yds" on one row, "$"#,##0.00 on another) can
-    // display as a column of ### once a differently-sized real value
-    // lands there - General avoids that entirely.
-    ws.getCell(r, KARIBAN_CONSUMPTION_COL).numFmt = 'General';
   }
 
   items.forEach((item, i) => {
@@ -611,8 +636,17 @@ function fillKaribanSection(ws, cfg, items, maxSheetRow) {
     ws.getCell(r, KARIBAN_COL.itemCode).value = item.code || null;
     ws.getCell(r, KARIBAN_COL.position).value = item.position || null;
     ws.getCell(r, KARIBAN_COL.description).value = item.description || null;
-    ws.getCell(r, KARIBAN_COL.consumption).value = (item.consumption_qty !== undefined && item.consumption_qty !== null && item.consumption_qty !== '')
-      ? Number(item.consumption_qty) : null;
+    const consCell = ws.getCell(r, KARIBAN_COL.consumption);
+    const hasQty = item.consumption_qty !== undefined && item.consumption_qty !== null && item.consumption_qty !== '';
+    consCell.value = hasQty ? Number(item.consumption_qty) : null;
+    // Custom format embeds the unit directly into the cell's own display
+    // (e.g. "4 Pcs", "2.35 Yds") instead of writing it as separate text -
+    // the stored value stays a plain number, so the Total Cost formula's
+    // K reference keeps working exactly as before.
+    if (hasQty) {
+      const unit = item.consumption_unit === 'Yds' ? 'Yds' : 'Pcs';
+      consCell.numFmt = unit === 'Yds' ? '0.00" Yds"' : '0" Pcs"';
+    }
     if (cfg.weightCol && item.weight_gsm) ws.getCell(r, cfg.weightCol).value = `${item.weight_gsm} gsm`;
     if (cfg.sizeWidthCol && item.size_mm) ws.getCell(r, cfg.sizeWidthCol).value = `${item.size_mm} mm`;
   });
@@ -639,7 +673,14 @@ async function buildKaribanCostSheet(templateArrayBuffer, itemsByBucket, styleIn
   let maxRow = originalRowCount;
   normalizeFormulasKariban(ws, maxRow, KARIBAN_MAX_COL);
 
+  // Date: always the date this Cost Sheet is generated (today), not
+  // something read off the tech pack. The cell's own d-mmm-yyyy display
+  // format already on the template is left exactly as-is - only the value
+  // changes.
+  ws.getCell('D4').value = new Date();
+
   if (styleInfo) {
+    if (styleInfo.brand) ws.getCell('D6').value = styleInfo.brand;
     if (styleInfo.itemDescription) ws.getCell('D7').value = styleInfo.itemDescription;
     if (styleInfo.styleCode) ws.getCell('D8').value = styleInfo.styleCode;
   }
@@ -752,7 +793,7 @@ const cbdStatusKariban = document.getElementById('cbdStatusKariban');
 
 let currentFileKariban = null;
 let currentKaribanItems = null;   // flat business-rule-applied item list
-let currentKaribanStyle = null;   // { styleCode, styleDesignation }
+let currentKaribanStyle = null;   // { styleCode, styleDesignation, brand }
 
 function setStatusKariban(msg, cls) {
   statusKaribanEl.textContent = msg;
@@ -798,13 +839,13 @@ processBtnKariban.addEventListener('click', async () => {
   processBtnKariban.classList.add('loading');
   resultsKariban.classList.remove('show');
   try {
-    const { rows, styleCode, styleDesignation } = await extractKaribanPlacementRows(currentFileKariban, (p, total) => {
+    const { rows, styleCode, styleDesignation, brand } = await extractKaribanPlacementRows(currentFileKariban, (p, total) => {
       processLabelKariban.textContent = `Scanning page ${p} / ${total}...`;
       setStatusKariban(`Scanning page ${p} of ${total}...`);
     });
     const items = applyKaribanBusinessRules(rows);
     currentKaribanItems = items;
-    currentKaribanStyle = { styleCode, styleDesignation };
+    currentKaribanStyle = { styleCode, styleDesignation, brand };
     if (items.length === 0) {
       setStatusKariban('No Fabrics / Trims / Label / Packaging items were found in this PDF.', 'err');
     } else {
