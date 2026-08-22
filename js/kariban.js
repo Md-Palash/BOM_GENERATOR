@@ -548,22 +548,59 @@ const KARIBAN_MAX_COL = 19; // through column S (Fabrics' extra FOB/CNF-by-yard 
 // between its column-header row (11) and its first real item (13): every
 // other section folds the section title into column A of the header row
 // itself, so their first real item follows immediately after.
+//
+// computedFormulas: this section's structural formulas, written fresh on
+// EVERY row (original and newly inserted alike) rather than trusted from
+// whatever the template currently contains. This matters because the
+// live template turned out to be inconsistent/stale in several ways: some
+// Fabric rows never had a CNF (R/S) formula at all, the FOB-by-Yds (P)
+// formula only existed on some rows, and Label's "CNF" column held
+// leftover hardcoded fractions (e.g. "=13/1000") from a previous style
+// rather than a real FOB*1.1 relationship. Explicitly (re)writing every
+// row's formulas here removes that dependency entirely.
+//   M  (Total Cost)            = (K+K*L)*J                      - every section
+//   R  (CNF price (M))         = Fob Price (M) + Including transport Cost   - Fabric only
+//   S  (CNF price by Yds)      = FOB Price by Yds + Including transport Cost - Fabric only
+//   O  (CNF, Label/Trim)       = FOB * 1.1                        - Label & Trim only
+// Fabric's O/P/Q (Fob Price (M), FOB Price by Yds, Including transport
+// Cost) are manual-entry-only per business rule and are deliberately left
+// out of computedFormulas - the row-clear below wipes them to a blank,
+// unstyled cell like any other plain data column.
+const KARIBAN_TOTAL_COST_FORMULA = r => `(K${r}+K${r}*L${r})*J${r}`;
 const KARIBAN_SECTIONS = {
-  Fabric: { headerRow: 11, firstBlank: 13, lastBlank: 17, totalRow: 18, weightCol: 7, sizeWidthCol: null },
-  Label: { headerRow: 19, firstBlank: 20, lastBlank: 30, totalRow: 31, weightCol: null, sizeWidthCol: null },
-  Trim: { headerRow: 32, firstBlank: 33, lastBlank: 35, totalRow: 36, weightCol: null, sizeWidthCol: 8 },
-  Packaging: { headerRow: 40, firstBlank: 41, lastBlank: 52, totalRow: 53, weightCol: null, sizeWidthCol: null },
+  Fabric: {
+    headerRow: 11, firstBlank: 13, lastBlank: 17, totalRow: 18, weightCol: 7, sizeWidthCol: null,
+    computedFormulas: [
+      { col: 13, formula: KARIBAN_TOTAL_COST_FORMULA },     // M
+      { col: 18, formula: r => `O${r}+Q${r}` },             // R - CNF price (M)
+      { col: 19, formula: r => `P${r}+Q${r}` },             // S - CNF price by Yds
+    ],
+  },
+  Label: {
+    headerRow: 19, firstBlank: 20, lastBlank: 30, totalRow: 31, weightCol: null, sizeWidthCol: null,
+    computedFormulas: [
+      { col: 13, formula: KARIBAN_TOTAL_COST_FORMULA },     // M
+      { col: 15, formula: r => `N${r}*1.1` },               // O - CNF = FOB * 1.1
+    ],
+  },
+  Trim: {
+    headerRow: 32, firstBlank: 33, lastBlank: 35, totalRow: 36, weightCol: null, sizeWidthCol: 8,
+    computedFormulas: [
+      { col: 13, formula: KARIBAN_TOTAL_COST_FORMULA },     // M
+      { col: 15, formula: r => `N${r}*1.1` },               // O - CNF = FOB * 1.1
+    ],
+  },
+  Packaging: {
+    headerRow: 40, firstBlank: 41, lastBlank: 52, totalRow: 53, weightCol: null, sizeWidthCol: null,
+    computedFormulas: [
+      { col: 13, formula: KARIBAN_TOTAL_COST_FORMULA },     // M only - no FOB/CNF block here
+    ],
+  },
 };
 const KARIBAN_COL = { item: 1, itemCode: 2, position: 3, description: 9, consumption: 11 };
-const KARIBAN_PRICE_COL = 10; // J - "price and consumption column" colors get cleared per business rule
+const KARIBAN_PRICE_COL = 10; // J - Price - always left blank; no section writes a price value
 const KARIBAN_CONSUMPTION_COL = 11; // K
-const KARIBAN_TOTAL_COST_COL = 13; // M - "(K+K*L)*J" - the ONE formula present on every single data
-                                    // row across every section/style. This is the sheet's actual
-                                    // calculation engine and must never be touched. (Other formulas
-                                    // occasionally found in the template's own example rows - e.g. a
-                                    // leftover "110/36" someone typed into Consumption for one item -
-                                    // are that old style's DATA, not sheet structure, and are cleared
-                                    // like any other stale field.)
+const KARIBAN_TOTAL_COST_COL = 13; // M - "(K+K*L)*J", now written via computedFormulas above
 
 function fillKaribanSection(ws, cfg, items, maxSheetRow) {
   const first = cfg.firstBlank;
@@ -575,17 +612,6 @@ function fillKaribanSection(ws, cfg, items, maxSheetRow) {
   const oldMerges = snapshotAndUnmergeAllKariban(ws);
   const rowTemplateMerges = oldMerges.filter(m => m.minRow === first).map(m => ({ minCol: m.minCol, maxCol: m.maxCol }));
 
-  // Formula columns this section's own template row actually carries (e.g.
-  // Fabric's FOB/CNF block in P/R/S, Label & Trim's single FOB-multiplier
-  // column O) - detected dynamically off the template's own last row
-  // rather than hardcoded to just Total Cost, so every section's real
-  // formula columns get carried onto a newly inserted row exactly like M
-  // already was.
-  const templateFormulaCols = [];
-  for (let c = 1; c <= KARIBAN_MAX_COL; c++) {
-    if (getFormulaKariban(ws.getCell(last, c))) templateFormulaCols.push(numToColLetterKariban(c));
-  }
-
   let insertAt = null;
   if (amount > 0) {
     insertAt = last;
@@ -595,39 +621,40 @@ function fillKaribanSection(ws, cfg, items, maxSheetRow) {
     for (let i = 0; i < amount; i++) {
       const newRow = insertAt + i;
       copyRowStyleKariban(ws, insertAt + amount, newRow, KARIBAN_MAX_COL);
-      copyRowFormulasKariban(ws, insertAt + amount, newRow, templateFormulaCols.length ? templateFormulaCols : KARIBAN_FORMULA_COLS);
     }
     maxSheetRow += amount;
     last += amount;
     cfg.totalRow += amount;
   }
 
-  // The template's own example rows carry real values for a different,
-  // unrelated style (Supplier, Contract Person, Price, Wastage, stray
-  // "Approximate price" side-notes out in column P, highlighted Price/
-  // Consumption cell fills, and occasionally a stray formula someone used
-  // to type in a data value like "=110/36" for Consumption...). Every one
-  // of those belongs to that old style, not this one, so the whole row is
-  // wiped clean first - EXCEPT any cell that already holds a formula
-  // (Total Cost, plus this section's own FOB/CNF formulas where present -
-  // see templateFormulaCols above): those must keep calculating from this
-  // row's own inputs, never be nulled out. Every cell that IS cleared also
-  // gets reset to General number format, so a leftover Accounting/Currency
-  // format inherited from the template's old example data (or copied onto
-  // a newly inserted row) can't force too-narrow-for-its-symbol display
-  // into "#####" once real data lands in it - this was most visible on
-  // merged zipper rows, whose combined code/description text sits in the
-  // same row as that inherited formatting.
+  // The template's own example rows carry real values (and, we've found,
+  // sometimes stale/incorrect formulas - e.g. Label's "CNF" column held
+  // leftover hardcoded fractions from a previous style rather than a real
+  // FOB*1.1 relationship, and Fabric's CNF columns didn't always have a
+  // formula at all) for a different, unrelated style. Every cell in the
+  // section is wiped unconditionally - value, number format, AND fill -
+  // so no leftover Accounting/Currency format or highlight color (e.g.
+  // the two orange "Super Dry"/"Carton" example rows in Packaging) can
+  // bleed onto a newly-written row. cfg.computedFormulas below then
+  // writes this sheet's actual structural formulas back in fresh,
+  // immediately after, so nothing is left uncalculated.
   const NO_FILL = { type: 'pattern', pattern: 'none' };
   for (let r = first; r <= last; r++) {
     for (let c = 1; c <= KARIBAN_MAX_COL; c++) {
       const cell = ws.getCell(r, c);
-      if (getFormulaKariban(cell)) continue;
       cell.value = null;
       cell.numFmt = 'General';
+      cell.fill = NO_FILL;
     }
-    ws.getCell(r, KARIBAN_PRICE_COL).fill = NO_FILL;
-    ws.getCell(r, KARIBAN_CONSUMPTION_COL).fill = NO_FILL;
+  }
+
+  // Re-apply this section's own structural formulas fresh on every row
+  // (original and newly-inserted alike) - see KARIBAN_SECTIONS above for
+  // exactly which columns/relationships each section defines.
+  for (const { col, formula } of (cfg.computedFormulas || [])) {
+    for (let r = first; r <= last; r++) {
+      setFormulaKariban(ws.getCell(r, col), formula(r));
+    }
   }
 
   items.forEach((item, i) => {
@@ -635,7 +662,11 @@ function fillKaribanSection(ws, cfg, items, maxSheetRow) {
     ws.getCell(r, KARIBAN_COL.item).value = item.item || null;
     ws.getCell(r, KARIBAN_COL.itemCode).value = item.code || null;
     ws.getCell(r, KARIBAN_COL.position).value = item.position || null;
-    ws.getCell(r, KARIBAN_COL.description).value = item.description || null;
+    const descCell = ws.getCell(r, KARIBAN_COL.description);
+    descCell.value = item.description || null;
+    // Wrap long descriptions instead of letting them overflow into
+    // neighboring cells or get visually truncated.
+    descCell.alignment = { wrapText: true, vertical: 'top' };
     const consCell = ws.getCell(r, KARIBAN_COL.consumption);
     const hasQty = item.consumption_qty !== undefined && item.consumption_qty !== null && item.consumption_qty !== '';
     consCell.value = hasQty ? Number(item.consumption_qty) : null;
@@ -681,7 +712,11 @@ async function buildKaribanCostSheet(templateArrayBuffer, itemsByBucket, styleIn
 
   if (styleInfo) {
     if (styleInfo.brand) ws.getCell('D6').value = styleInfo.brand;
-    if (styleInfo.itemDescription) ws.getCell('D7').value = styleInfo.itemDescription;
+    // "Designation (EN)" from the tech pack's page-1 Properties table
+    // (e.g. "Unisex high-visibility reversible jacket") is what belongs in
+    // the "Item Description" cell - not a separate itemDescription field,
+    // which nothing in extraction ever populated.
+    if (styleInfo.styleDesignation) ws.getCell('D7').value = styleInfo.styleDesignation;
     if (styleInfo.styleCode) ws.getCell('D8').value = styleInfo.styleCode;
   }
 
@@ -735,7 +770,10 @@ async function buildKaribanSupplyChainWorkbook(sessions) {
       const key = karibanDedupeKey(item.description);
       if (!key || seenGlobal.has(key)) continue;
       seenGlobal.add(key);
-      ws.addRow({ style: session.styleCode, code: item.code, desc: item.description, pic: '', supplier: '' });
+      const row = ws.addRow({ style: session.styleCode, code: item.code, desc: item.description, pic: '', supplier: '' });
+      // Wrap long descriptions instead of letting them overflow past the
+      // column width, so the sheet stays readable at a glance.
+      row.getCell('desc').alignment = { wrapText: true, vertical: 'top' };
       wroteAny = true;
     }
     if (wroteAny) ws.addRow({}); // blank separator after this style's block
