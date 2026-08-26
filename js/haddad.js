@@ -830,12 +830,49 @@ function sanitizeSheetName(name){
   return n || 'Sheet';
 }
 
+// Resolves which of the tech pack's known size labels an item's own
+// Size-scale text actually names. A plain substring test isn't safe here:
+// some size groups share a leading word with an entirely different, more
+// specific size group on the very same tech pack - e.g. "TODDLER" and
+// "TODDLER CHILD EU" are two distinct size groups (not the same group
+// written two ways), but "toddler" is literally a substring of "toddler
+// child eu", so a naive .includes() wrongly treats an item scoped only to
+// "TODDLER CHILD EU" as also belonging to the plain "TODDLER" tab.
+//
+// Fix: first find every known label that appears anywhere in the item's
+// Size-scale text, then drop any label that is itself fully swallowed by
+// a LONGER label that also matched - the longer, more specific label is
+// what the field actually names, so the shorter one it contains isn't a
+// genuine separate match. Two size groups that are both present (e.g. an
+// item genuinely stocked on two stacked lines, "BIG GIRLS ALPHA (XS - XL)"
+// and "TODDLER") are unaffected, since neither is a substring of the
+// other - both remain.
+function resolveItemSizeLabels(item, allSizeLabels){
+  const scaleNorm = normSize(item._sizeScale);
+  let candidates = allSizeLabels.filter(lbl => scaleNorm.includes(normSize(lbl)));
+  candidates = candidates.filter(lbl => {
+    const lblNorm = normSize(lbl);
+    return !candidates.some(other => {
+      const otherNorm = normSize(other);
+      return otherNorm !== lblNorm && otherNorm.includes(lblNorm);
+    });
+  });
+  return candidates;
+}
+
 // True if this item belongs on the tab for sizeLabel. An item with no
 // Size-scale text at all (extraction miss, or a section like Fabric that
 // doesn't carry the field) is included on every tab rather than dropped.
-function itemAppliesToSize(item, sizeLabel){
+// When sizeLabel itself is blank (the single-tab fallback used when page 1
+// yielded no size candidates at all), every item applies too. allSizeLabels
+// is the full list of size labels found on this tech pack's page 1 - see
+// resolveItemSizeLabels for why every label needs to be known at once
+// rather than comparing the item against just the one tab's label.
+function itemAppliesToSize(item, sizeLabel, allSizeLabels){
   if (!item._sizeScale) return true;
-  return normSize(item._sizeScale).includes(normSize(sizeLabel));
+  if (!sizeLabel) return true;
+  const matches = resolveItemSizeLabels(item, allSizeLabels || []);
+  return matches.some(lbl => normSize(lbl) === normSize(sizeLabel));
 }
 
 // Fabric-only fallback for the same "one physical slot, several colorway
@@ -1101,6 +1138,10 @@ async function mergeIntoCostBreakDown(templateArrayBuffer, extractedItems, produ
   const sizes = (headerInfo && headerInfo.sizes && headerInfo.sizes.length)
     ? headerInfo.sizes
     : [{ label: '', token: '' }];
+  // Every real size label found on page 1, passed to itemAppliesToSize so
+  // it can tell apart size groups that share a leading word (e.g.
+  // "TODDLER" vs "TODDLER CHILD EU") - see resolveItemSizeLabels.
+  const allSizeLabels = sizes.map(s => s.label).filter(Boolean);
 
   // The product image buffer only needs to be registered with the
   // workbook once; the same image id can be placed on every tab.
@@ -1150,7 +1191,7 @@ async function mergeIntoCostBreakDown(templateArrayBuffer, extractedItems, produ
     // cell, so that formula always errored until now.
     ws.getCell('N50').value = 0.6;
 
-    const accessoryItems = dedupeByGroupKey(accessoryItemsAll.filter(r => itemAppliesToSize(r, sizeLabel)));
+    const accessoryItems = dedupeByGroupKey(accessoryItemsAll.filter(r => itemAppliesToSize(r, sizeLabel, allSizeLabels)));
 
     const cfgAcc = { ...SECTION_CONFIG.Accessories, extraCols: [
       { col: 9, compute: computeConsumption },
