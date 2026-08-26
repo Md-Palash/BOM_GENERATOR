@@ -834,29 +834,56 @@ function sanitizeSheetName(name){
 // Size-scale text actually names. A plain substring test isn't safe here:
 // some size groups share a leading word with an entirely different, more
 // specific size group on the very same tech pack - e.g. "TODDLER" and
-// "TODDLER CHILD EU" are two distinct size groups (not the same group
-// written two ways), but "toddler" is literally a substring of "toddler
-// child eu", so a naive .includes() wrongly treats an item scoped only to
-// "TODDLER CHILD EU" as also belonging to the plain "TODDLER" tab.
+// "TODDLER CHILD EU (2A-8A)" are two distinct size groups (not the same
+// group written two ways), but "toddler" is literally a substring of
+// "toddler child eu (2a-8a)", so a naive .includes() wrongly treats an
+// item scoped only to the longer group as also belonging to the plain
+// "TODDLER" tab.
 //
-// Fix: first find every known label that appears anywhere in the item's
-// Size-scale text, then drop any label that is itself fully swallowed by
-// a LONGER label that also matched - the longer, more specific label is
-// what the field actually names, so the shorter one it contains isn't a
-// genuine separate match. Two size groups that are both present (e.g. an
-// item genuinely stocked on two stacked lines, "BIG GIRLS ALPHA (XS - XL)"
-// and "TODDLER") are unaffected, since neither is a substring of the
-// other - both remain.
+// Position-aware fix: for each candidate label found in the item's text,
+// check WHERE it occurs, not just whether it occurs. If every occurrence
+// of a shorter label sits entirely inside an occurrence of some longer,
+// also-matching label, it's just that longer label's leading prefix and
+// gets dropped. But if the shorter label also occurs somewhere on its
+// own - e.g. two stacked lines in the same cell, "TODDLER" followed
+// immediately by "TODDLER CHILD EU (2A-8A)" with no delimiter between
+// them - that standalone occurrence is a genuine separate match and the
+// label is kept. This correctly handles both an item scoped ONLY to the
+// longer group (shorter label dropped) and an item genuinely stocked on
+// both groups at once (both labels kept), using nothing but the item's
+// own text.
+function findAllSpans(haystack, needle){
+  const spans = [];
+  if (!needle) return spans;
+  let i = haystack.indexOf(needle);
+  while (i !== -1){
+    spans.push([i, i + needle.length]);
+    i = haystack.indexOf(needle, i + 1);
+  }
+  return spans;
+}
+
 function resolveItemSizeLabels(item, allSizeLabels){
   const scaleNorm = normSize(item._sizeScale);
   let candidates = allSizeLabels.filter(lbl => scaleNorm.includes(normSize(lbl)));
+
   candidates = candidates.filter(lbl => {
     const lblNorm = normSize(lbl);
-    return !candidates.some(other => {
-      const otherNorm = normSize(other);
-      return otherNorm !== lblNorm && otherNorm.includes(lblNorm);
-    });
+    // Union of every span where some OTHER, longer candidate label (one
+    // that fully contains this one as a substring) actually occurs in the
+    // item's own text.
+    const supersetSpans = candidates
+      .filter(other => normSize(other) !== lblNorm && normSize(other).includes(lblNorm))
+      .flatMap(other => findAllSpans(scaleNorm, normSize(other)));
+    if (supersetSpans.length === 0) return true; // no longer label matched here - keep
+
+    const ownSpans = findAllSpans(scaleNorm, lblNorm);
+    // Keep this label if ANY of its own occurrences falls outside every
+    // superset span - a genuine standalone mention, not just a longer
+    // label's leading prefix.
+    return ownSpans.some(([s, e]) => !supersetSpans.some(([ss, se]) => s >= ss && e <= se));
   });
+
   return candidates;
 }
 
