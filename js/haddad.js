@@ -800,6 +800,15 @@ const ACCESSORY_PRICE_RULES = {
   'P0108': { price: { formula: '0.008*1.1' }, supplier: 'MAXIM', remark: 'FREIGHT CHARGE ADDED' },
   'P1098': { price: 0.016, supplier: 'UNIGLORY', remark: '' },
   'T0330': { price: 0.04, supplier: 'REGULAR PRICE', remark: '' },
+  'T0645': { price: { formula: '20.82/1000*1.1' }, supplier: 'YKK', remark: 'FREIGHT CHARGE ADDED' },
+  'T0644': { price: { formula: '30.97/1000*1.1' }, supplier: 'YKK', remark: 'FREIGHT CHARGE ADDED' },
+  'P8182': { price: { formula: '0.017*1.1' }, supplier: 'MAXIM', remark: 'FREIGHT CHARGE ADDED' },
+  'T0109': { price: { formula: '26.75/1000*1.1' }, supplier: 'YKK', remark: 'FREIGHT CHARGE ADDED' },
+  'T0090': { price: { formula: '43.82/1000*1.1' }, supplier: 'YKK', remark: 'FREIGHT CHARGE ADDED' },
+  'T0141': { price: { formula: '6.89/1000*1.1' }, supplier: 'YKK', remark: 'FREIGHT CHARGE ADDED' },
+  'T0107': { price: { formula: '32.72/1000*1.1' }, supplier: 'YKK', remark: 'FREIGHT CHARGE ADDED' },
+  'T0087': { price: { formula: '41.28/1000*1.1' }, supplier: 'YKK', remark: 'FREIGHT CHARGE ADDED' },
+  'T4804': { price: { formula: '45.03/1000*1.1' }, supplier: 'YKK', remark: 'FREIGHT CHARGE ADDED' },
 };
 
 // A merged zipper row's internalCode is a "+"-joined concatenation (e.g.
