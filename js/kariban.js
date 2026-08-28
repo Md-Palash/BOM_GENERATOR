@@ -180,13 +180,16 @@ async function extractKaribanPlacementRows(file, onProgress) {
       }
       // Brand - read the same way as Style/Designation above, from
       // whichever label token on page 1's Properties table matches "Brand".
-      // Left blank (same fallback as the two fields above) if this exact
-      // label text isn't found on this tech pack's page 1.
+      // Unlike Designation, the brand value is a short code (e.g. "WK"),
+      // not a multi-word phrase - take only the single nearest token so a
+      // closely-spaced adjacent Properties row can never bleed into this
+      // field. Left blank (same fallback as the two fields above) if this
+      // exact label text isn't found on this tech pack's page 1.
       const brandLabel = items.find(it => normKariban(it.str) === 'Brand');
       if (brandLabel) {
         const valTok = items.filter(it => Math.abs(it.y - brandLabel.y) <= 3 && it.x > brandLabel.x + 20)
           .sort((a, b) => a.x - b.x);
-        styleBrand = valTok.map(t => t.str.trim()).join(' ').trim();
+        styleBrand = valTok.length ? valTok[0].str.trim() : '';
       }
     }
 
@@ -275,6 +278,11 @@ async function extractKaribanPlacementRows(file, onProgress) {
 
 const KARIBAN_YDS_KEYWORDS = /elastic|velcro|tape|cord/i;
 const KARIBAN_EXCLUDE_KEYWORDS = /sewing|use guide|method/i;
+// Interlining/interfacing/fusible is fabric material for costing purposes,
+// even when the tech pack itself files it under Trims (Trimmings &
+// Accessories) - it always belongs in the Fabric bucket regardless of
+// which divider it was found under.
+const KARIBAN_INTERLINING_KEYWORDS = /interlining|interfacing|fusible/i;
 
 function karibanCodeOf(product) { return (product || '').slice(0, 8); }
 
@@ -354,6 +362,11 @@ function applyKaribanBusinessRules(rows) {
       else if (isKaribanTrimDivider(d.divider)) bucket = 'Trim';
       else continue;
       if (bucket === 'Trim' && /\bthread\b/i.test(product)) continue; // Trims: exclude thread only
+      // Interlining/interfacing/fusible is fabric material regardless of
+      // which divider the tech pack filed it under - redirect it into the
+      // Fabric bucket before weight/size/unit are computed below, so it
+      // gets Fabric's own field treatment (weight_gsm, no size_mm).
+      if (bucket === 'Trim' && KARIBAN_INTERLINING_KEYWORDS.test(product)) bucket = 'Fabric';
       // Source Remarks/Comments text sometimes uses "/" as its own
       // separator (e.g. "Windproof / Breathable / Waterproof") - the
       // buyer wants those joined with a plain space instead.
@@ -559,19 +572,21 @@ const KARIBAN_MAX_COL = 19; // through column S (Fabrics' extra FOB/CNF-by-yard 
 // rather than a real FOB*1.1 relationship. Explicitly (re)writing every
 // row's formulas here removes that dependency entirely.
 //   M  (Total Cost)            = (K+K*L)*J                      - every section
+//   P  (FOB Price by Yds)      = Fob Price (M) * 0.9144            - Fabric only
 //   R  (CNF price (M))         = Fob Price (M) + Including transport Cost   - Fabric only
 //   S  (CNF price by Yds)      = FOB Price by Yds + Including transport Cost - Fabric only
 //   O  (CNF, Label/Trim)       = FOB * 1.1                        - Label & Trim only
-// Fabric's O/P/Q (Fob Price (M), FOB Price by Yds, Including transport
-// Cost) are manual-entry-only per business rule and are deliberately left
-// out of computedFormulas - the row-clear below wipes them to a blank,
-// unstyled cell like any other plain data column.
+// Fabric's O/Q (Fob Price (M), Including transport Cost) are
+// manual-entry-only per business rule and are deliberately left out of
+// computedFormulas - the row-clear below wipes them to a blank, unstyled
+// cell like any other plain data column.
 const KARIBAN_TOTAL_COST_FORMULA = r => `(K${r}+K${r}*L${r})*J${r}`;
 const KARIBAN_SECTIONS = {
   Fabric: {
     headerRow: 11, firstBlank: 13, lastBlank: 17, totalRow: 18, weightCol: 7, sizeWidthCol: null,
     computedFormulas: [
       { col: 13, formula: KARIBAN_TOTAL_COST_FORMULA },     // M
+      { col: 16, formula: r => `O${r}*0.9144` },            // P - FOB Price by Yds = Fob Price (M) * 0.9144
       { col: 18, formula: r => `O${r}+Q${r}` },             // R - CNF price (M)
       { col: 19, formula: r => `P${r}+Q${r}` },             // S - CNF price by Yds
     ],
@@ -639,12 +654,20 @@ function fillKaribanSection(ws, cfg, items, maxSheetRow) {
   // writes this sheet's actual structural formulas back in fresh,
   // immediately after, so nothing is left uncalculated.
   const NO_FILL = { type: 'pattern', pattern: 'none' };
+  const CENTER_MIDDLE = { horizontal: 'center', vertical: 'middle' };
   for (let r = first; r <= last; r++) {
     for (let c = 1; c <= KARIBAN_MAX_COL; c++) {
       const cell = ws.getCell(r, c);
       cell.value = null;
       cell.numFmt = 'General';
       cell.fill = NO_FILL;
+      // Item Code (Fabric Code / Item Code) and Position read cleaner
+      // centered, both horizontally and vertically, than left/top-aligned
+      // like the rest of the row - set across the whole column so it's
+      // consistent even before any item lands in a given row.
+      if (c === KARIBAN_COL.itemCode || c === KARIBAN_COL.position) {
+        cell.alignment = CENTER_MIDDLE;
+      }
     }
   }
 
