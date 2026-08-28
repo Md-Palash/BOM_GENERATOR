@@ -277,9 +277,25 @@ function filterCanadaItems(results){
 function mergeZipperItems(results){
   const ZIPPER_RE = /zipper|zip\b/i;
   const TEETH_RE = /teeth|chain/i;
-  const SLIDER_RE = /puller|slider|pull(?:\s|-)?tab/i;
+  // Some buyers/products name the puller "PULL" outright (e.g. "ZIPPER
+  // PULL", "EMBOSS RAISED A&F ZIP PULL") rather than "PULLER" - \bpull\b
+  // catches that standalone word too, while the word boundaries still
+  // keep it from matching unrelated words like "PULLOVER".
+  const SLIDER_RE = /puller|slider|pull(?:\s|-)?tab|\bpull\b/i;
   const TAPE_RE = /tape/i;
-  const PART_RE = /tape|teeth|chain|puller|slider|pull(?:\s|-)?tab/i;
+  const PART_RE = /tape|teeth|chain|puller|slider|pull(?:\s|-)?tab|\bpull\b/i;
+
+  // Classification signal for which physical zipper part a row is: Type
+  // and Name text first, but ALSO the column heading printed directly
+  // above that row's own column (e.g. "CF ZIPPER TEETH", "CF ZIPPER
+  // PULL") - some products give the teeth/puller generic Type/Name text
+  // ("ZIPPER-EXPOSED METAL" / "OPEN-END EXPOSED METAL" for teeth, with no
+  // literal "teeth" anywhere) but the column heading itself always names
+  // the part explicitly, since that's the whole reason it's printed.
+  // Checking the header too is purely additive - a blank header never
+  // matches anything, so this can only recover matches Type/Name missed,
+  // never introduce a false one where Type/Name alone would've been fine.
+  function partText(g){ return `${g._type || ''} ${g._name || ''} ${g._columnHeader || ''}`; }
 
   // A bucket with just one part is shared by every size grouping, exactly
   // as before. A bucket with several parts picks the one whose own Size
@@ -300,15 +316,35 @@ function mergeZipperItems(results){
     if (isZipperPart){
       const group = [r];
       let j = i + 1;
-      while (j < results.length && results[j].section === r.section &&
-             (ZIPPER_RE.test(results[j]._type) || ZIPPER_RE.test(results[j]._name) || PART_RE.test(results[j]._type) || PART_RE.test(results[j]._name))){
-        group.push(results[j]);
+      while (j < results.length && results[j].section === r.section){
+        const jItem = results[j];
+        const directZipperMention = ZIPPER_RE.test(jItem._type) || ZIPPER_RE.test(jItem._name);
+        if (directZipperMention){
+          group.push(jItem);
+          j++;
+          continue;
+        }
+        const looksLikePart = PART_RE.test(jItem._type) || PART_RE.test(jItem._name);
+        if (!looksLikePart) break;
+        // A generic part-keyword match alone (e.g. Type "TAPE") isn't
+        // enough to continue the group if this row has its OWN column
+        // heading and that heading clearly names something unrelated
+        // (e.g. "HANGTAG LOOP") rather than a zipper sub-part - some
+        // buyers reuse generic Type labels like "TAPE" for entirely
+        // different trims, and without this check that next unrelated
+        // item gets silently swallowed into the zipper merge and lost.
+        // A blank heading is not treated as contradicting evidence -
+        // some products never populate this field, so falling back to
+        // the plain part-keyword match (as before) is still correct then.
+        const header = (jItem._columnHeader || '').trim();
+        if (header && !ZIPPER_RE.test(header)) break;
+        group.push(jItem);
         j++;
       }
       if (group.length > 1){
-        const teethBucket = group.filter(g => TEETH_RE.test(g._type) || TEETH_RE.test(g._name));
-        const sliderBucket = group.filter(g => SLIDER_RE.test(g._type) || SLIDER_RE.test(g._name));
-        const tapeBucket = group.filter(g => TAPE_RE.test(g._type) || TAPE_RE.test(g._name));
+        const teethBucket = group.filter(g => TEETH_RE.test(partText(g)));
+        const sliderBucket = group.filter(g => SLIDER_RE.test(partText(g)) && !teethBucket.includes(g));
+        const tapeBucket = group.filter(g => TAPE_RE.test(partText(g)) && !teethBucket.includes(g) && !sliderBucket.includes(g));
         const leftover = group.filter(g => !teethBucket.includes(g) && !sliderBucket.includes(g) && !tapeBucket.includes(g));
         const allBuckets = [teethBucket, sliderBucket, tapeBucket, leftover];
 
