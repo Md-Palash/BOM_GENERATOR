@@ -12,11 +12,13 @@ const DECATHLON_PASSWORD = 'Decathlon#2026';
 const HADDAD_PASSWORD = 'Haddad#2026';
 const MALACCA_PASSWORD = 'MalaccaMalacca';
 const KARIBAN_PASSWORD = 'Karibanban';
+const PORTWEST_PASSWORD = 'Portwest#2026';
 let unlockedHaddad = false;
 let unlockedDecathlon = false;
 let unlockedMalacca = false;
 let unlockedKariban = false;
-let pendingUnlock = null; // { which: 'haddad' | 'decathlon' | 'malacca' | 'kariban', onSuccess }
+let unlockedPortwest = false;
+let pendingUnlock = null; // { which: 'haddad' | 'decathlon' | 'malacca' | 'kariban' | 'portwest', onSuccess }
 
 const pwOverlay = document.getElementById('pwOverlay');
 const pwInput = document.getElementById('pwInput');
@@ -27,10 +29,10 @@ const pwSubmit = document.getElementById('pwSubmit');
 const pwCancel = document.getElementById('pwCancel');
 
 function requestUnlock(which, onSuccess) {
-  const already = which === 'haddad' ? unlockedHaddad : which === 'decathlon' ? unlockedDecathlon : which === 'kariban' ? unlockedKariban : unlockedMalacca;
+  const already = which === 'haddad' ? unlockedHaddad : which === 'decathlon' ? unlockedDecathlon : which === 'kariban' ? unlockedKariban : which === 'portwest' ? unlockedPortwest : unlockedMalacca;
   if (already) { onSuccess(); return; }
   pendingUnlock = { which, onSuccess };
-  const label = which === 'haddad' ? 'Haddad' : which === 'decathlon' ? 'Decathlon' : which === 'kariban' ? 'Kariban' : 'Malacca';
+  const label = which === 'haddad' ? 'Haddad' : which === 'decathlon' ? 'Decathlon' : which === 'kariban' ? 'Kariban' : which === 'portwest' ? 'Portwest' : 'Malacca';
   pwTitle.textContent = label + ' Tool';
   pwSub.textContent = 'This tool is password protected. Enter the password to continue.';
   pwInput.value = '';
@@ -46,11 +48,12 @@ function closePwOverlay() {
 
 function tryPwSubmit() {
   if (!pendingUnlock) return;
-  const correct = pendingUnlock.which === 'haddad' ? HADDAD_PASSWORD : pendingUnlock.which === 'decathlon' ? DECATHLON_PASSWORD : pendingUnlock.which === 'kariban' ? KARIBAN_PASSWORD : MALACCA_PASSWORD;
+  const correct = pendingUnlock.which === 'haddad' ? HADDAD_PASSWORD : pendingUnlock.which === 'decathlon' ? DECATHLON_PASSWORD : pendingUnlock.which === 'kariban' ? KARIBAN_PASSWORD : pendingUnlock.which === 'portwest' ? PORTWEST_PASSWORD : MALACCA_PASSWORD;
   if (pwInput.value === correct) {
     if (pendingUnlock.which === 'haddad') unlockedHaddad = true;
     else if (pendingUnlock.which === 'decathlon') unlockedDecathlon = true;
     else if (pendingUnlock.which === 'kariban') unlockedKariban = true;
+    else if (pendingUnlock.which === 'portwest') unlockedPortwest = true;
     else unlockedMalacca = true;
     const cb = pendingUnlock.onSuccess;
     closePwOverlay();
