@@ -617,14 +617,6 @@ const KARIBAN_COL = { item: 1, itemCode: 2, position: 3, description: 9, consump
 const KARIBAN_PRICE_COL = 10; // J - Price - always left blank; no section writes a price value
 const KARIBAN_CONSUMPTION_COL = 11; // K
 const KARIBAN_TOTAL_COST_COL = 13; // M - "(K+K*L)*J", now written via computedFormulas above
-const KARIBAN_WASTAGE_COL = 12; // L - 5% default, 15% thread, 0% discount (see karibanWastageFor)
-
-function karibanWastageFor(item) {
-  const text = `${item.item || ''} ${item.description || ''} ${item.code || ''}`;
-  if (/\bthread\b/i.test(text)) return 0.15;
-  if (/\bdiscount\b/i.test(text)) return 0;
-  return 0.05;
-}
 
 function fillKaribanSection(ws, cfg, items, maxSheetRow) {
   const first = cfg.firstBlank;
@@ -680,11 +672,6 @@ function fillKaribanSection(ws, cfg, items, maxSheetRow) {
       // consistent even before any item lands in a given row.
       if (c === KARIBAN_COL.itemCode || c === KARIBAN_COL.position) {
         cell.alignment = CENTER_MIDDLE;
-      } else if (c === KARIBAN_COL.description) {
-        // Applied blanket-wide (not just on populated rows) so a section's
-        // unused capacity rows (e.g. Packaging, which rarely fills all 12
-        // slots) don't keep the template's own inherited alignment.
-        cell.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
       } else {
         // Every other data cell still gets wrap text (per business rule:
         // every cell below the sheet's row-10 intro block wraps), just
@@ -724,11 +711,6 @@ function fillKaribanSection(ws, cfg, items, maxSheetRow) {
     // Left-aligned but vertically centered, with wrap text so a long
     // description doesn't overflow into neighboring cells.
     descCell.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
-    // Wastage (%): 5% default, 15% for thread, 0% for discount - matched
-    // against the item's own text so it applies regardless of section.
-    const wastageCell = ws.getCell(r, KARIBAN_WASTAGE_COL);
-    wastageCell.value = karibanWastageFor(item);
-    wastageCell.numFmt = '0.00%';
     const consCell = ws.getCell(r, KARIBAN_COL.consumption);
     const hasQty = item.consumption_qty !== undefined && item.consumption_qty !== null && item.consumption_qty !== '';
     consCell.value = hasQty ? Number(item.consumption_qty) : null;
@@ -805,12 +787,6 @@ async function buildKaribanCostSheet(templateArrayBuffer, itemsByBucket, styleIn
       cell.alignment = Object.assign({}, cell.alignment, { wrapText: true });
     }
   }
-
-  // Buyer (D5, e.g. "KARIBAN BRANDS") - forced left-aligned explicitly,
-  // done here (after every section's own merge unmerge/remerge cycle
-  // above, which touches every merge in the whole sheet including this
-  // one) rather than earlier, where it would just get reset.
-  ws.getCell('D5').alignment = Object.assign({}, ws.getCell('D5').alignment, { horizontal: 'left' });
 
   if (styleInfo && styleInfo.styleCode) {
     ws.name = styleInfo.styleCode.replace(/[\\/?*\[\]:]/g, '-').slice(0, 31) || 'Sheet';
