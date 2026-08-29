@@ -272,12 +272,19 @@ async function extractPortwestPdf(file, onProgress) {
       if (isPortwestBoilerplateLine(line)) continue;
 
       // Header row repeats at the top of every page and always spans
-      // exactly 3 physical lines: main row, the "Weight" wrap of
-      // "Material Weight", then the remaining labels. It is NOT reliably
-      // followed by a category tag — on continuation pages it's followed
-      // straight by data rows of the already-current category — so we
-      // consume a fixed line count rather than scanning for a delimiter
-      // (mirrors the Malacca engine's header handling).
+      // exactly 2 physical lines: the main row (Placement...Comment,
+      // Orange, Yellow, all on one baseline) followed by "Weight" alone
+      // (the wrap of "Material Weight", since "Material" is wider than
+      // the "Weight" sub-label beneath it). Verified directly against the
+      // sample PDF's text coordinates — there is no 3rd header line. It is
+      // NOT reliably followed by a category tag — on continuation pages
+      // it's followed straight by data rows of the already-current
+      // category — so we consume a fixed line count rather than scanning
+      // for a delimiter (mirrors the Malacca engine's header handling).
+      // IMPORTANT: consuming one line too many here (e.g. 3 instead of 2)
+      // silently eats either the category tag or the page's first data
+      // row into the discarded header buffer — confirmed to cause exactly
+      // that data loss when this was set to 3.
       //
       // The trigger match is deliberately forgiving: real PDF text
       // extraction can split a word like "Placement" across multiple
@@ -299,7 +306,7 @@ async function extractPortwestPdf(file, onProgress) {
         }
       }
       if (headerCollecting) {
-        if (headerLinesCollected < 3) {
+        if (headerLinesCollected < 2) {
           headerItemsBuf.push(...line.items);
           headerLinesCollected++;
           continue;
@@ -340,11 +347,21 @@ async function extractPortwestPdf(file, onProgress) {
         cols[key] = (cols[key] ? cols[key] + ' ' : '') + it.text;
       }
 
-      // New logical row starts when this line has content in the
-      // Placement column (leftmost); anything else is a wrapped
-      // continuation of the previous row's fields (Description/Position
-      // most commonly run onto extra lines).
-      if (cols.placement.trim()) {
+      // New logical row starts when this line has content in BOTH the
+      // Placement column (leftmost) AND the Code column. Checking
+      // Placement alone is not enough: a long Placement label (e.g.
+      // "Reflective Tape", "Hook & Loop", "Oeko-Tex Label") can itself
+      // wrap onto a second physical line, and that wrapped remainder
+      // ("Tape", "Loop", "Label") still lands in the Placement column on
+      // its own line — confirmed against the sample PDF's coordinates.
+      // Code, by contrast, is short and never wraps, so it's only ever
+      // present on a row's true first line. Requiring both avoids
+      // splitting one wrapped-label row into two bogus rows (and
+      // corrupting the real row's data in the process). Any other
+      // wrapped field (Description/Position most commonly run onto extra
+      // lines) still has neither Placement nor Code, so it's correctly
+      // treated as a continuation either way.
+      if (cols.placement.trim() && cols.code.trim()) {
         flushRow();
         activeRow = portwestBlankRow();
         for (const k of Object.keys(cols)) activeRow[k] = cols[k].trim();
