@@ -51,7 +51,7 @@ function derivePortwestColumnBoundaries(headerItems) {
     return matches[occurrence] !== undefined ? matches[occurrence].x : null;
   }
   const candidates = [
-    ['placement',      anchorX('Placement', 0)],
+    ['placement',      anchorX('Place', 0)],
     ['mainMaterial',   anchorX('Main', 0)],
     ['code',           anchorX('Code', 0)],
     ['image',          anchorX('Imag', 0)],
@@ -140,35 +140,33 @@ function extractPortwestCoverInfo(items) {
 
   const lines = portwestClusterLines(zoneItems, 3);
   const values = {};
-  // Longest label first so "Style Code" claims its tokens before the
-  // shorter "Style" label gets a chance to match the same starting token.
-  const labelsByLengthDesc = [...PORTWEST_COVER_LABELS].sort((a, b) => b.split(' ').length - a.split(' ').length);
+  // Longest label first so a regex alternation match prefers "Style Code"
+  // over "Style" when both could start matching at the same position.
+  const labelsByLengthDesc = [...PORTWEST_COVER_LABELS].sort((a, b) => b.length - a.length);
+  const labelPattern = new RegExp(labelsByLengthDesc.map(l => l.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g');
 
   for (const line of lines) {
-    // Find every label occurrence on this line (sorted by x), each
-    // introduces a value that runs up to the next label (or line end).
-    const claimed = new Array(line.items.length).fill(false);
-    const labelHits = [];
-    for (const label of labelsByLengthDesc) {
-      const labelTokens = label.split(' ');
-      for (let i = 0; i <= line.items.length - labelTokens.length; i++) {
-        if (claimed[i]) continue;
-        const slice = line.items.slice(i, i + labelTokens.length);
-        if (slice.map(s => s.text).join(' ') === label) {
-          labelHits.push({ label, x: slice[0].x, endIdx: i + labelTokens.length });
-          for (let k = i; k < i + labelTokens.length; k++) claimed[k] = true;
-          break;
-        }
-      }
-    }
-    if (!labelHits.length) continue;
-    labelHits.sort((a, b) => a.x - b.x);
-    for (let h = 0; h < labelHits.length; h++) {
-      const startIdx = labelHits[h].endIdx;
-      const nextX = h + 1 < labelHits.length ? labelHits[h + 1].x : Infinity;
-      const valueItems = line.items.filter((it, idx) => idx >= startIdx && it.x < nextX);
-      const text = valueItems.map(it => it.text).join(' ').trim();
-      if (text) values[labelHits[h].label] = (values[labelHits[h].label] ? values[labelHits[h].label] + ' ' : '') + text;
+    // Reconstruct this line's full text by joining items with a single
+    // space. Deliberately NOT item-index-based: a label like "Style Code"
+    // may arrive from pdf.js as one combined text run OR as two separate
+    // word-level runs depending on how the source PDF was generated —
+    // matching against the flattened string handles either shape
+    // identically, whereas matching label token-count against a fixed
+    // number of consecutive items (the previous approach) silently failed
+    // whenever a label happened to be a single run instead of split words
+    // (confirmed against a real generated PDF: every multi-word label
+    // failed to match, causing Style Code to come back empty and
+    // Description to swallow all the way to the end of the line).
+    const lineText = line.items.map(it => it.text).join(' ');
+    const hits = [...lineText.matchAll(labelPattern)];
+    if (!hits.length) continue;
+
+    for (let h = 0; h < hits.length; h++) {
+      const label = hits[h][0];
+      const startIdx = hits[h].index + label.length;
+      const endIdx = h + 1 < hits.length ? hits[h + 1].index : lineText.length;
+      const text = lineText.slice(startIdx, endIdx).trim();
+      if (text) values[label] = (values[label] ? values[label] + ' ' : '') + text;
     }
   }
 
@@ -248,12 +246,15 @@ async function extractPortwestPdf(file, onProgress) {
       coverInfo = extractPortwestCoverInfo(items);
     }
 
-    // Confirm this is a "Placements" (BOM) page: a "Placements" title
-    // sits near the top of the page.
-    const isPlacementsPage = items.some(it => it.text === 'Placements' && it.y < 60);
-    if (!isPlacementsPage) continue;
-
-    const contentItems = items.filter(it => it.y > 30 && it.y < viewport.height - 10);
+    // NOTE: earlier versions gated page processing on an exact text match
+    // for a "Placements" title at an assumed y-coordinate (y < 60). That
+    // was an unverified guess (never checked against a real rendered PDF)
+    // and turned out to be wrong, causing every page to be silently
+    // skipped and zero items ever extracted. There is no separate title
+    // gate any more — a page is simply whatever pages contain the table's
+    // own "Placement" column-header row (detected below); pages without
+    // it naturally contribute nothing, with no fragile pre-check needed.
+    const contentItems = items.filter(it => it.y > 0);
     const lines = portwestClusterLines(contentItems, 2.5);
 
     // The page banner ("<Style Name> <Code> <Code> BOM <status>, <time>")
@@ -277,11 +278,25 @@ async function extractPortwestPdf(file, onProgress) {
       // straight by data rows of the already-current category — so we
       // consume a fixed line count rather than scanning for a delimiter
       // (mirrors the Malacca engine's header handling).
-      if (line.items[0] && line.items[0].text === 'Placement' && line.items[0].x < 30) {
-        headerCollecting = true;
-        headerItemsBuf = [...line.items];
-        headerLinesCollected = 1;
-        continue;
+      //
+      // The trigger match is deliberately forgiving: real PDF text
+      // extraction can split a word like "Placement" across multiple
+      // text runs at kerning pairs (e.g. "Place" + "ment"), so instead of
+      // requiring the line's first item to be the exact string
+      // "Placement", the leading item(s) are concatenated and matched
+      // case-insensitively, with no coordinate/position requirement at
+      // all — "Placement" as a whole word is confirmed (via the tech
+      // pack's own text content) to only ever appear as this one column
+      // header, never as data, so matching on text alone is safe and
+      // avoids yet another unverified coordinate assumption.
+      if (!headerCollecting && !sawHeaderOnThisPage) {
+        const leadText = line.items.slice(0, 3).map(i => i.text).join('').trim().toLowerCase();
+        if (leadText.startsWith('placement') && line.items[0]) {
+          headerCollecting = true;
+          headerItemsBuf = [...line.items];
+          headerLinesCollected = 1;
+          continue;
+        }
       }
       if (headerCollecting) {
         if (headerLinesCollected < 3) {
