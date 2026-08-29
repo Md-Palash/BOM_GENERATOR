@@ -898,7 +898,7 @@ cbdBtnPw.addEventListener('click', async () => {
   cbdStatusPw.textContent = '';
   cbdStatusPw.className = 'status';
   try {
-    const templateResp = await fetch('assets/portwest-format.xlsx');
+    const templateResp = await fetch('assets/Portwest_Format.xlsx');
     if (!templateResp.ok) throw new Error('Could not load the Portwest cost sheet template asset.');
     const templateBuffer = await templateResp.arrayBuffer();
     const { buffer, bucketedCounts } = await buildPortwestCostSheet(templateBuffer, currentPwExtracted);
