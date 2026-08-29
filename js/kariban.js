@@ -584,6 +584,7 @@ const KARIBAN_TOTAL_COST_FORMULA = r => `(K${r}+K${r}*L${r})*J${r}`;
 const KARIBAN_SECTIONS = {
   Fabric: {
     headerRow: 11, firstBlank: 13, lastBlank: 17, totalRow: 18, weightCol: 7, sizeWidthCol: null,
+    greenCols: [15, 16, 17, 18, 19], // O-S: the FOB/CNF block, kept visually distinct with a green fill
     computedFormulas: [
       { col: 13, formula: KARIBAN_TOTAL_COST_FORMULA },     // M
       { col: 16, formula: r => `O${r}*0.9144` },            // P - FOB Price by Yds = Fob Price (M) * 0.9144
@@ -654,21 +655,41 @@ function fillKaribanSection(ws, cfg, items, maxSheetRow) {
   // writes this sheet's actual structural formulas back in fresh,
   // immediately after, so nothing is left uncalculated.
   const NO_FILL = { type: 'pattern', pattern: 'none' };
-  const CENTER_MIDDLE = { horizontal: 'center', vertical: 'middle' };
+  const CENTER_MIDDLE = { horizontal: 'center', vertical: 'middle', wrapText: true };
+  const GREEN_DATA_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFC5E0B4' } };
   for (let r = first; r <= last; r++) {
     for (let c = 1; c <= KARIBAN_MAX_COL; c++) {
       const cell = ws.getCell(r, c);
       cell.value = null;
       cell.numFmt = 'General';
-      cell.fill = NO_FILL;
+      // FOB/CNF block (Fabric only) keeps its green highlight instead of
+      // going white like every other cleared cell - matches the
+      // template's own visual marker for this manual/formula input block.
+      cell.fill = (cfg.greenCols && cfg.greenCols.includes(c)) ? GREEN_DATA_FILL : NO_FILL;
       // Item Code (Fabric Code / Item Code) and Position read cleaner
       // centered, both horizontally and vertically, than left/top-aligned
       // like the rest of the row - set across the whole column so it's
       // consistent even before any item lands in a given row.
       if (c === KARIBAN_COL.itemCode || c === KARIBAN_COL.position) {
         cell.alignment = CENTER_MIDDLE;
+      } else {
+        // Every other data cell still gets wrap text (per business rule:
+        // every cell below the sheet's row-10 intro block wraps), just
+        // without forcing center alignment.
+        cell.alignment = Object.assign({}, cell.alignment, { wrapText: true });
       }
     }
+  }
+
+  // Header row (e.g. "Item Code", "Position", "Description" ...) reads
+  // cleaner centered - and, for Fabric, its green FOB/CNF header cells
+  // (O-S) keep the template's bright-green marker rather than the paler
+  // shade used on the data rows below them.
+  const GREEN_HEADER_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF92D050' } };
+  for (let c = 1; c <= KARIBAN_MAX_COL; c++) {
+    const headerCell = ws.getCell(cfg.headerRow, c);
+    headerCell.alignment = CENTER_MIDDLE;
+    if (cfg.greenCols && cfg.greenCols.includes(c)) headerCell.fill = GREEN_HEADER_FILL;
   }
 
   // Re-apply this section's own structural formulas fresh on every row
@@ -687,9 +708,9 @@ function fillKaribanSection(ws, cfg, items, maxSheetRow) {
     ws.getCell(r, KARIBAN_COL.position).value = item.position || null;
     const descCell = ws.getCell(r, KARIBAN_COL.description);
     descCell.value = item.description || null;
-    // Wrap long descriptions instead of letting them overflow into
-    // neighboring cells or get visually truncated.
-    descCell.alignment = { wrapText: true, vertical: 'top' };
+    // Left-aligned but vertically centered, with wrap text so a long
+    // description doesn't overflow into neighboring cells.
+    descCell.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
     const consCell = ws.getCell(r, KARIBAN_COL.consumption);
     const hasQty = item.consumption_qty !== undefined && item.consumption_qty !== null && item.consumption_qty !== '';
     consCell.value = hasQty ? Number(item.consumption_qty) : null;
@@ -752,6 +773,19 @@ async function buildKaribanCostSheet(templateArrayBuffer, itemsByBucket, styleIn
     const items = itemsByBucket[bucket] || [];
     counts[bucket] = items.length;
     ({ maxSheetRow: maxRow } = fillKaribanSection(ws, cfg, items, maxRow));
+  }
+
+  // Every cell below the sheet's row-10 intro/header block gets wrap text -
+  // including rows fillKaribanSection never touches directly, like the
+  // untouched Embroidery & Print block and the summary/commission rows at
+  // the bottom. Merged (not overwritten) onto whatever alignment a cell
+  // already has, so the center-middle/left-middle alignment already set
+  // above for headers, Item Code/Position, and Description survives.
+  for (let r = 11; r <= maxRow; r++) {
+    for (let c = 1; c <= KARIBAN_MAX_COL; c++) {
+      const cell = ws.getCell(r, c);
+      cell.alignment = Object.assign({}, cell.alignment, { wrapText: true });
+    }
   }
 
   if (styleInfo && styleInfo.styleCode) {
