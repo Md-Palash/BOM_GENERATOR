@@ -581,6 +581,19 @@ const KARIBAN_MAX_COL = 19; // through column S (Fabrics' extra FOB/CNF-by-yard 
 // computedFormulas - the row-clear below wipes them to a blank, unstyled
 // cell like any other plain data column.
 const KARIBAN_TOTAL_COST_FORMULA = r => `(K${r}+K${r}*L${r})*J${r}`;
+// Sewing thread is intentionally excluded from extraction (per business
+// rule, its per-style consumption isn't reliably readable from the tech
+// pack), and instead represented by this single fixed line, always
+// appended after whatever real Trim items were extracted - taken verbatim
+// from the template's own row 35 (including its "Sewig Thread" spelling).
+const KARIBAN_TRIM_STATIC_ROWS = [{
+  item: 'Sewig Thread', code: '', position: '', supplier: 'Coats',
+  priceTerms: 'LOCAL', paymentTerm: 'LC 120 DAYS',
+  description: 'Sewig Thread--40/3 (40Tex)',
+  price: 1.24, priceFmt: '"$"#,##0.00',
+  consumption: 350 / 3000, consumptionFmt: '0.00" mtr"',
+  wastage: 0.15,
+}];
 const KARIBAN_SECTIONS = {
   Fabric: {
     headerRow: 11, firstBlank: 13, lastBlank: 17, totalRow: 18, weightCol: 7, sizeWidthCol: null,
@@ -601,6 +614,7 @@ const KARIBAN_SECTIONS = {
   },
   Trim: {
     headerRow: 32, firstBlank: 33, lastBlank: 35, totalRow: 36, weightCol: null, sizeWidthCol: 8,
+    staticRows: KARIBAN_TRIM_STATIC_ROWS,
     computedFormulas: [
       { col: 13, formula: KARIBAN_TOTAL_COST_FORMULA },     // M
       { col: 15, formula: r => `N${r}*1.1` },               // O - CNF = FOB * 1.1
@@ -617,12 +631,21 @@ const KARIBAN_COL = { item: 1, itemCode: 2, position: 3, description: 9, consump
 const KARIBAN_PRICE_COL = 10; // J - Price - always left blank; no section writes a price value
 const KARIBAN_CONSUMPTION_COL = 11; // K
 const KARIBAN_TOTAL_COST_COL = 13; // M - "(K+K*L)*J", now written via computedFormulas above
+const KARIBAN_WASTAGE_COL = 12; // L - 5% default, 15% thread, 0% discount (see karibanWastageFor)
+
+function karibanWastageFor(item) {
+  const text = `${item.item || ''} ${item.description || ''} ${item.code || ''}`;
+  if (/\bthread\b/i.test(text)) return 0.15;
+  if (/\bdiscount\b/i.test(text)) return 0;
+  return 0.05;
+}
 
 function fillKaribanSection(ws, cfg, items, maxSheetRow) {
   const first = cfg.firstBlank;
   let last = cfg.lastBlank;
   const available = last - first + 1;
-  const needed = items.length;
+  const staticRows = cfg.staticRows || [];
+  const needed = items.length + staticRows.length;
   const amount = Math.max(0, needed - available);
 
   const oldMerges = snapshotAndUnmergeAllKariban(ws);
@@ -672,6 +695,11 @@ function fillKaribanSection(ws, cfg, items, maxSheetRow) {
       // consistent even before any item lands in a given row.
       if (c === KARIBAN_COL.itemCode || c === KARIBAN_COL.position) {
         cell.alignment = CENTER_MIDDLE;
+      } else if (c === KARIBAN_COL.description) {
+        // Applied blanket-wide (not just on populated rows) so a section's
+        // unused capacity rows (e.g. Packaging, which rarely fills all 12
+        // slots) don't keep the template's own inherited alignment.
+        cell.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
       } else {
         // Every other data cell still gets wrap text (per business rule:
         // every cell below the sheet's row-10 intro block wraps), just
@@ -711,6 +739,11 @@ function fillKaribanSection(ws, cfg, items, maxSheetRow) {
     // Left-aligned but vertically centered, with wrap text so a long
     // description doesn't overflow into neighboring cells.
     descCell.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
+    // Wastage (%): 5% default, 15% for thread, 0% for discount - matched
+    // against the item's own text so it applies regardless of section.
+    const wastageCell = ws.getCell(r, KARIBAN_WASTAGE_COL);
+    wastageCell.value = karibanWastageFor(item);
+    wastageCell.numFmt = '0.00%';
     const consCell = ws.getCell(r, KARIBAN_COL.consumption);
     const hasQty = item.consumption_qty !== undefined && item.consumption_qty !== null && item.consumption_qty !== '';
     consCell.value = hasQty ? Number(item.consumption_qty) : null;
@@ -724,6 +757,37 @@ function fillKaribanSection(ws, cfg, items, maxSheetRow) {
     }
     if (cfg.weightCol && item.weight_gsm) ws.getCell(r, cfg.weightCol).value = `${item.weight_gsm} gsm`;
     if (cfg.sizeWidthCol && item.size_mm) ws.getCell(r, cfg.sizeWidthCol).value = `${item.size_mm} mm`;
+  });
+
+  // Fixed rows (currently just Trim's "Sewig Thread" line) go right after
+  // the real extracted items - always present regardless of what was
+  // extracted, since they represent business-constant values rather than
+  // BOM data. Their own Description cell already got left-middle+wrap
+  // alignment from the blanket per-row pass above, same as every other row.
+  staticRows.forEach((sr, i) => {
+    const r = first + items.length + i;
+    ws.getCell(r, KARIBAN_COL.item).value = sr.item || null;
+    ws.getCell(r, KARIBAN_COL.itemCode).value = sr.code || null;
+    ws.getCell(r, KARIBAN_COL.position).value = sr.position || null;
+    if (sr.supplier) ws.getCell(r, 4).value = sr.supplier;           // D - Supplier
+    if (sr.priceTerms) ws.getCell(r, 6).value = sr.priceTerms;       // F - Price Terms
+    if (sr.paymentTerm) ws.getCell(r, 7).value = sr.paymentTerm;     // G - Payment Term
+    ws.getCell(r, KARIBAN_COL.description).value = sr.description || null;
+    if (sr.price !== undefined) {
+      const priceCell = ws.getCell(r, KARIBAN_PRICE_COL);
+      priceCell.value = sr.price;
+      if (sr.priceFmt) priceCell.numFmt = sr.priceFmt;
+    }
+    if (sr.consumption !== undefined) {
+      const consCell = ws.getCell(r, KARIBAN_COL.consumption);
+      consCell.value = sr.consumption;
+      if (sr.consumptionFmt) consCell.numFmt = sr.consumptionFmt;
+    }
+    if (sr.wastage !== undefined) {
+      const wastageCell = ws.getCell(r, KARIBAN_WASTAGE_COL);
+      wastageCell.value = sr.wastage;
+      wastageCell.numFmt = '0.00%';
+    }
   });
 
   if (amount > 0) {
@@ -787,6 +851,12 @@ async function buildKaribanCostSheet(templateArrayBuffer, itemsByBucket, styleIn
       cell.alignment = Object.assign({}, cell.alignment, { wrapText: true });
     }
   }
+
+  // Buyer (D5, e.g. "KARIBAN BRANDS") - forced left-aligned explicitly,
+  // done here (after every section's own merge unmerge/remerge cycle
+  // above, which touches every merge in the whole sheet including this
+  // one) rather than earlier, where it would just get reset.
+  ws.getCell('D5').alignment = Object.assign({}, ws.getCell('D5').alignment, { horizontal: 'left' });
 
   if (styleInfo && styleInfo.styleCode) {
     ws.name = styleInfo.styleCode.replace(/[\\/?*\[\]:]/g, '-').slice(0, 31) || 'Sheet';
