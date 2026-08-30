@@ -414,17 +414,33 @@ const PORTWEST_METERS_TO_YARDS = 1.09361;
 // decimals) vs. length items measured in meters, converted to yards
 // ("2.45 yds" — 2 decimals). Any other/unrecognised UOM falls back to a
 // plain "<value> <UOM>" pieces-style label so nothing silently disappears.
+// FIX (formatting bug): a column-boundary artifact in the source PDF can
+// occasionally push the row's leading quantity digit into the UOM field
+// itself instead of qtyDefault (observed as e.g. uom = "1 Pieces" while
+// qtyDefault comes through blank/zero). The old exact-match check
+// (`u === 'PIECES'`) failed on that shape, fell through to the
+// "unrecognised UOM" branch, and built a numFmt of `0" 1 PIECES"` — Excel
+// then rendered the cell's numeric value (0) followed by that literal
+// suffix text, producing the "0 1 PIECES" display bug. This version
+// strips any leading numeric token off the UOM text first, recovers it as
+// the quantity if qtyDefault itself came through empty, and only then
+// classifies the cleaned unit text.
 function portwestClassifyConsumption(uom, qtyDefault) {
-  const u = (uom || '').trim().toUpperCase();
-  const qty = parseFloat(qtyDefault) || 0;
-  if (u === 'PIECES' || u === 'PCS' || u === 'PC') {
+  const rawUom = (uom || '').trim();
+  const leadingQtyMatch = rawUom.match(/^(\d+(?:\.\d+)?)\s*(.*)$/);
+  const cleanedUom = (leadingQtyMatch ? leadingQtyMatch[2] : rawUom).trim().toUpperCase();
+  const recoveredQty = leadingQtyMatch ? parseFloat(leadingQtyMatch[1]) : null;
+  const qty = parseFloat(qtyDefault) || recoveredQty || 0;
+
+  if (cleanedUom === 'PIECES' || cleanedUom === 'PCS' || cleanedUom === 'PC') {
     return { value: qty, numFmt: '0" Pcs"' };
   }
-  if (u === 'M' || u === 'MTR' || u === 'MTRS' || u === 'METER' || u === 'METERS') {
+  if (cleanedUom === 'M' || cleanedUom === 'MTR' || cleanedUom === 'MTRS' || cleanedUom === 'METER' || cleanedUom === 'METERS') {
     return { value: qty * PORTWEST_METERS_TO_YARDS, numFmt: '0.00" yds"' };
   }
-  // Unrecognised UOM — surface the tech pack's own unit rather than guessing.
-  return { value: qty, numFmt: `0" ${u.replace(/"/g, '')}"` };
+  // Unrecognised UOM — surface the tech pack's own (now-cleaned) unit
+  // rather than guessing, but never leak stray digits into the numFmt text.
+  return { value: qty, numFmt: `0" ${cleanedUom.replace(/"/g, '')}"` };
 }
 
 /* ============================================================
@@ -478,6 +494,91 @@ function portwestCopyCellStyle(srcCell, dstCell) {
 // isolated to this one cell.
 function portwestSetNumFmt(cell, numFmt) {
   cell.style = Object.assign({}, cell.style, { numFmt });
+}
+
+// Sets wrapText:true on a cell while preserving whatever other alignment
+// properties (horizontal/vertical/indent) it already had from the template
+// or from earlier styling — mirrors the "clone, don't mutate" pattern used
+// by portwestSetNumFmt above, since style objects can be shared by
+// reference across unrelated cells in this template.
+function portwestSetWrapText(cell) {
+  const currentAlignment = (cell.style && cell.style.alignment) || {};
+  cell.style = Object.assign({}, cell.style, {
+    alignment: Object.assign({}, currentAlignment, { wrapText: true }),
+  });
+}
+
+// Excel worksheet names can't contain \ / ? * [ ] : and are capped at 31
+// characters — sanitize whatever we build from the tech pack's own style
+// code/description before assigning it as the tab name.
+function portwestSanitizeSheetName(name) {
+  return (name || '').replace(/[\\/?*[\]:]/g, '-').trim().slice(0, 31) || 'Sheet1';
+}
+
+// Unmerging a range that isn't actually merged throws in ExcelJS — this
+// just swallows that so callers don't need to track merge state themselves.
+function portwestSafeUnmerge(ws, row, fromCol, toCol) {
+  try { ws.unMergeCells(row, fromCol, row, toCol); } catch (e) { /* wasn't merged — fine */ }
+}
+
+// Finds the first column (1-indexed, scanning left to right from fromCol)
+// in a row whose cell holds a formula or a plain number — i.e. the row's
+// first "computed value" cell. Used to detect where a summary/subtotal
+// row's label zone ends without hardcoding exact column boundaries, so
+// this keeps working even if a future template revision shifts columns.
+function portwestFindFirstValueCol(ws, row, fromCol, maxCol) {
+  for (let c = fromCol; c <= maxCol; c++) {
+    const cell = ws.getCell(row, c);
+    if (cell.type === ExcelJS.ValueType.Formula || typeof cell.value === 'number') return c;
+  }
+  return maxCol + 1;
+}
+
+// Merges a subtotal/summary row's label cells (everything left of its
+// first computed-value cell) into a single centered, middle-aligned,
+// wrapped cell. Row insertion/removal via spliceRows/portwestCopyRowStyle
+// can leave a row's label text duplicated across every cell in that zone
+// (each cell showing the same words instead of one visually-merged cell)
+// — this collapses that back down to one real merged cell with the text
+// once. Safe to call on a row that's already correctly merged (it just
+// unmerges and re-merges the same range).
+function portwestMergeRowLabel(ws, row, fromCol, maxCol) {
+  const valueCol = portwestFindFirstValueCol(ws, row, fromCol, maxCol);
+  const lastLabelCol = valueCol - 1;
+  if (lastLabelCol <= fromCol) return; // nothing to merge (no label zone found)
+  let label = '';
+  for (let c = fromCol; c <= lastLabelCol; c++) {
+    const cell = ws.getCell(row, c);
+    if (!label && typeof cell.value === 'string' && cell.value.trim()) label = cell.value.trim();
+    cell.value = null;
+  }
+  portwestSafeUnmerge(ws, row, fromCol, lastLabelCol);
+  ws.mergeCells(row, fromCol, row, lastLabelCol);
+  const merged = ws.getCell(row, fromCol);
+  merged.value = label;
+  merged.style = Object.assign({}, merged.style, {
+    alignment: { horizontal: 'center', vertical: 'middle', wrapText: true },
+  });
+}
+
+// Same idea as portwestMergeRowLabel, but merges a fixed left-hand column
+// range (through Description) and left-aligns the result rather than
+// centering — used for Packaging's "Test cost"/"Discount" rows, which
+// read as a left-aligned note rather than a centered section total.
+function portwestMergeLeftLabel(ws, row, fromCol, toCol) {
+  let label = '';
+  for (let c = fromCol; c <= toCol; c++) {
+    const cell = ws.getCell(row, c);
+    if (!label && typeof cell.value === 'string' && cell.value.trim()) label = cell.value.trim();
+    cell.value = null;
+  }
+  portwestSafeUnmerge(ws, row, fromCol, toCol);
+  ws.mergeCells(row, fromCol, row, toCol);
+  const merged = ws.getCell(row, fromCol);
+  merged.value = label;
+  merged.style = Object.assign({}, merged.style, {
+    alignment: { horizontal: 'left', vertical: 'middle', wrapText: true },
+  });
 }
 
 // The template stores many formula columns (M, O, P, etc.) as Excel
@@ -567,6 +668,13 @@ async function buildPortwestCostSheet(templateArrayBuffer, extracted) {
   if (cover.description) ws.getCell('D7').value = cover.description;  // Item Description
   ws.getCell('D4').value = new Date();                                 // Date (keeps template's existing date format)
 
+  // --- Excel tab name: "<Style Name/Description> - <Style Code>" ---
+  // Falls back gracefully if either piece is missing (e.g. cover-page
+  // parsing came back partial), and is sanitized for Excel's forbidden
+  // tab-name characters (\ / ? * [ ] :) and 31-character limit.
+  const tabNameRaw = [cover.description, cover.styleCode].filter(Boolean).join(' - ');
+  if (tabNameRaw) ws.name = portwestSanitizeSheetName(tabNameRaw);
+
   // --- Bucket extracted rows into their target sections ---
   const bucketed = { FABRICS: [], BRANDING: [], TRIMS: [], EMBROIDERY: [], PACKAGING: [] };
   const counts = {};
@@ -655,6 +763,23 @@ async function buildPortwestCostSheet(templateArrayBuffer, extracted) {
     });
   }
 
+  // --- Wrap text across every cell in Fabrics / Trims / Labels(Branding) /
+  //     Packaging's data rows. Packaging's fixed "Test cost"/"Discount"
+  //     tail rows are excluded here — they get their own left-aligned
+  //     merge-and-wrap treatment below instead, since they're a note
+  //     rather than an item row. ---
+  const WRAP_SECTIONS = ['FABRICS', 'TRIMS', 'BRANDING', 'PACKAGING'];
+  for (const key of WRAP_SECTIONS) {
+    const sec = PORTWEST_SECTIONS_BY_KEY[key];
+    const excludeTailRows = key === 'PACKAGING' ? sec.fixedTailRows : 0;
+    const endRow = finalSubtotalRow[key] - 1 - excludeTailRows;
+    for (let r = finalDataStart[key]; r <= endRow; r++) {
+      for (let c = 1; c <= MAXCOL; c++) {
+        portwestSetWrapText(ws.getCell(r, c));
+      }
+    }
+  }
+
   // --- Regenerate every row-local formula (M, and O/P/R/S where
   //     applicable) at each row's OWN final position, for every row in
   //     the section's final layout — data rows AND any fixed tail rows
@@ -699,6 +824,31 @@ async function buildPortwestCostSheet(templateArrayBuffer, extracted) {
   // K7 sits in the fixed header block (never itself shifts) but points at
   // M55's new location.
   ws.getCell('K7').value = { formula: `M${totalCostPcRow}` };
+
+  // --- Merge duplicated label cells into a single centered, middle-
+  //     aligned cell for every section subtotal row, the CM/Pc row, the
+  //     Total Cost/Pc row, and the summary rows underneath them ("Price
+  //     per min (supplier profit included)", "SAM (Sewing) in min",
+  //     "Overall working efficiency (OWE) based on SAM (Sewing)"). Each
+  //     row's own first formula/number cell is detected dynamically, so
+  //     this adapts automatically to whichever column actually holds that
+  //     row's computed value rather than assuming a fixed column. ---
+  for (const key of order) {
+    portwestMergeRowLabel(ws, finalSubtotalRow[key], 1, MAXCOL);
+  }
+  portwestMergeRowLabel(ws, cmPcRow, 1, MAXCOL);
+  portwestMergeRowLabel(ws, totalCostPcRow, 1, MAXCOL);
+  for (const origRow of [58, 59, 60, 61, 62]) {
+    portwestMergeRowLabel(ws, origRow + totalDelta, 1, MAXCOL);
+  }
+
+  // --- Test cost / Discount rows: merge through Description (col I) and
+  //     left-align + middle-align, since these read as a note rather than
+  //     a centered section total. ---
+  const testCostRow = finalSubtotalRow.PACKAGING - 2;
+  const discountRow = finalSubtotalRow.PACKAGING - 1;
+  portwestMergeLeftLabel(ws, testCostRow, 1, 9);
+  portwestMergeLeftLabel(ws, discountRow, 1, 9);
 
   const buffer = await workbook.xlsx.writeBuffer();
   return { buffer, counts, bucketedCounts: Object.fromEntries(order.map(k => [k, bucketed[k].length])) };
