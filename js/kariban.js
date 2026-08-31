@@ -597,6 +597,19 @@ const KARIBAN_TRIM_STATIC_ROWS = [{
   consumptionFill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFBE5D6' } },
   wastage: 0.15,
 }];
+// Same reasoning as the thread row above: these two are fixed business
+// lines, not BOM data, and were getting wiped out along with the rest of
+// Packaging's stale example rows whenever fewer than 12 real items were
+// extracted (i.e. almost always) - taken verbatim from the template's own
+// rows 51-52.
+const KARIBAN_PACKAGING_STATIC_ROWS = [
+  { item: 'Test cost', code: '', position: '', description: '',
+    price: 0.05, priceFmt: '"$"#,##0.00',
+    consumption: 1, consumptionFmt: '0" Pcs"', wastage: 0.05 },
+  { item: 'Discount', code: '', position: '', description: '',
+    price: 0, priceFmt: '"$"#,##0.00',
+    consumption: 1, consumptionFmt: '0" Pcs"', wastage: 0 },
+];
 const KARIBAN_SECTIONS = {
   Fabric: {
     headerRow: 11, firstBlank: 13, lastBlank: 17, totalRow: 18, weightCol: 7, sizeWidthCol: null,
@@ -625,6 +638,7 @@ const KARIBAN_SECTIONS = {
   },
   Packaging: {
     headerRow: 40, firstBlank: 41, lastBlank: 52, totalRow: 53, weightCol: null, sizeWidthCol: null,
+    staticRows: KARIBAN_PACKAGING_STATIC_ROWS,
     computedFormulas: [
       { col: 13, formula: KARIBAN_TOTAL_COST_FORMULA },     // M only - no FOB/CNF block here
     ],
