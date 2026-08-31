@@ -521,51 +521,31 @@ function portwestSafeUnmerge(ws, row, fromCol, toCol) {
   try { ws.unMergeCells(row, fromCol, row, toCol); } catch (e) { /* wasn't merged — fine */ }
 }
 
-// Finds the first column (1-indexed, scanning left to right from fromCol)
-// in a row whose cell holds a formula or a plain number — i.e. the row's
-// first "computed value" cell. Used to detect where a summary/subtotal
-// row's label zone ends without hardcoding exact column boundaries, so
-// this keeps working even if a future template revision shifts columns.
-function portwestFindFirstValueCol(ws, row, fromCol, maxCol) {
-  for (let c = fromCol; c <= maxCol; c++) {
-    const cell = ws.getCell(row, c);
-    if (cell.type === ExcelJS.ValueType.Formula || typeof cell.value === 'number') return c;
-  }
-  return maxCol + 1;
-}
-
-// Merges a subtotal/summary row's label cells (everything left of its
-// first computed-value cell) into a single centered, middle-aligned,
-// wrapped cell. Row insertion/removal via spliceRows/portwestCopyRowStyle
-// can leave a row's label text duplicated across every cell in that zone
-// (each cell showing the same words instead of one visually-merged cell)
-// — this collapses that back down to one real merged cell with the text
-// once. Safe to call on a row that's already correctly merged (it just
-// unmerges and re-merges the same range).
-function portwestMergeRowLabel(ws, row, fromCol, maxCol) {
-  const valueCol = portwestFindFirstValueCol(ws, row, fromCol, maxCol);
-  const lastLabelCol = valueCol - 1;
-  if (lastLabelCol <= fromCol) return; // nothing to merge (no label zone found)
-  let label = '';
-  for (let c = fromCol; c <= lastLabelCol; c++) {
-    const cell = ws.getCell(row, c);
-    if (!label && typeof cell.value === 'string' && cell.value.trim()) label = cell.value.trim();
-    cell.value = null;
-  }
-  portwestSafeUnmerge(ws, row, fromCol, lastLabelCol);
-  ws.mergeCells(row, fromCol, row, lastLabelCol);
-  const merged = ws.getCell(row, fromCol);
-  merged.value = label;
-  merged.style = Object.assign({}, merged.style, {
-    alignment: { horizontal: 'center', vertical: 'middle', wrapText: true },
-  });
-}
-
-// Same idea as portwestMergeRowLabel, but merges a fixed left-hand column
-// range (through Description) and left-aligns the result rather than
-// centering — used for Packaging's "Test cost"/"Discount" rows, which
-// read as a left-aligned note rather than a centered section total.
-function portwestMergeLeftLabel(ws, row, fromCol, toCol) {
+// Merges a FIXED, explicitly-given column range in a row into one cell and
+// applies the given alignment. The range is always passed explicitly by
+// the caller (never auto-detected by scanning the row) — an earlier
+// version tried to find the "value column" by scanning every cell in the
+// row from column 1 onward, but several of these summary rows share their
+// physical row with an unrelated left-hand data block that has its own
+// early numeric cells (e.g. row 58's column C holds a plain "0" that has
+// nothing to do with the right-hand "Overall working efficiency" label),
+// so that scan stopped at the wrong column and produced badly wrong merge
+// boundaries. Fixed, verified column numbers avoid that entirely.
+//
+// Also IMPORTANT and confirmed by direct testing against this template:
+// ExcelJS's spliceRows does not reliably preserve merged-cell ranges once
+// multiple splice operations cascade across a sheet (both insertions and
+// deletions) — even merges that ship pre-baked in the template (e.g. the
+// section subtotal rows' A:L merge) can end up unmerged after the section
+// insert/remove passes run. The cell VALUES survive correctly, just not
+// the merge state. So this function is written to be safe to call
+// unconditionally regardless of whether the range's merge already existed,
+// already broke, or never existed: it reads whichever cell in the range
+// currently holds text (if any), clears the range, safely unmerges
+// whatever may or may not be currently merged there, then re-merges fresh
+// at the row's final (already-shifted) position.
+function portwestMergeAndAlign(ws, row, fromCol, toCol, alignment) {
+  if (toCol <= fromCol) return;
   let label = '';
   for (let c = fromCol; c <= toCol; c++) {
     const cell = ws.getCell(row, c);
@@ -575,10 +555,8 @@ function portwestMergeLeftLabel(ws, row, fromCol, toCol) {
   portwestSafeUnmerge(ws, row, fromCol, toCol);
   ws.mergeCells(row, fromCol, row, toCol);
   const merged = ws.getCell(row, fromCol);
-  merged.value = label;
-  merged.style = Object.assign({}, merged.style, {
-    alignment: { horizontal: 'left', vertical: 'middle', wrapText: true },
-  });
+  if (label) merged.value = label;
+  merged.style = Object.assign({}, merged.style, { alignment });
 }
 
 // The template stores many formula columns (M, O, P, etc.) as Excel
@@ -825,30 +803,51 @@ async function buildPortwestCostSheet(templateArrayBuffer, extracted) {
   // M55's new location.
   ws.getCell('K7').value = { formula: `M${totalCostPcRow}` };
 
-  // --- Merge duplicated label cells into a single centered, middle-
-  //     aligned cell for every section subtotal row, the CM/Pc row, the
-  //     Total Cost/Pc row, and the summary rows underneath them ("Price
-  //     per min (supplier profit included)", "SAM (Sewing) in min",
-  //     "Overall working efficiency (OWE) based on SAM (Sewing)"). Each
-  //     row's own first formula/number cell is detected dynamically, so
-  //     this adapts automatically to whichever column actually holds that
-  //     row's computed value rather than assuming a fixed column. ---
+  // --- Re-merge every summary/subtotal label row at its final (already
+  //     row-shifted) position, using exact column ranges verified against
+  //     the real Portwest_Format.xlsx template — not auto-detected, for
+  //     the reasons explained in portwestMergeAndAlign's own comment.
+  //     This is done unconditionally for every row here, whether or not
+  //     that row's merge happened to survive the section insert/remove
+  //     passes above, since that survival isn't reliable across multiple
+  //     cascaded splices. ---
+  const CENTER_MIDDLE_WRAP = { horizontal: 'center', vertical: 'middle', wrapText: true };
+  const LEFT_MIDDLE_WRAP = { horizontal: 'left', vertical: 'middle', wrapText: true };
+
+  // Section subtotal rows ("Sub Total:") — label spans columns A:L (1-12),
+  // value sits in M (13). Applied to every section, including Embroidery
+  // (whose original template row happens not to ship pre-merged), so all
+  // five subtotal rows are visually consistent.
   for (const key of order) {
-    portwestMergeRowLabel(ws, finalSubtotalRow[key], 1, MAXCOL);
-  }
-  portwestMergeRowLabel(ws, cmPcRow, 1, MAXCOL);
-  portwestMergeRowLabel(ws, totalCostPcRow, 1, MAXCOL);
-  for (const origRow of [58, 59, 60, 61, 62]) {
-    portwestMergeRowLabel(ws, origRow + totalDelta, 1, MAXCOL);
+    portwestMergeAndAlign(ws, finalSubtotalRow[key], 1, 12, CENTER_MIDDLE_WRAP);
   }
 
-  // --- Test cost / Discount rows: merge through Description (col I) and
-  //     left-align + middle-align, since these read as a note rather than
-  //     a centered section total. ---
+  // CM/Pc and Total Cost/Pc — label spans I:L (9-12), value in M (13).
+  portwestMergeAndAlign(ws, cmPcRow, 9, 12, CENTER_MIDDLE_WRAP);
+  portwestMergeAndAlign(ws, totalCostPcRow, 9, 12, CENTER_MIDDLE_WRAP);
+
+  // "Price per min (supplier profit included)", "SAM (Sewing) in min", and
+  // "Overall working efficiency (OWE) based on SAM (Sewing)" sit on the
+  // three rows directly below Total Cost/Pc, shifting by the same
+  // totalDelta as the rest of this fixed summary block. Same I:L / M
+  // geometry as CM/Pc and Total Cost/Pc above, for visual consistency.
+  const pricePerMinRow = 56 + totalDelta;
+  const samRow = 57 + totalDelta;
+  const oweRow = 58 + totalDelta;
+  portwestMergeAndAlign(ws, pricePerMinRow, 9, 12, CENTER_MIDDLE_WRAP);
+  portwestMergeAndAlign(ws, samRow, 9, 12, CENTER_MIDDLE_WRAP);
+  portwestMergeAndAlign(ws, oweRow, 9, 12, CENTER_MIDDLE_WRAP);
+
+  // Test cost / Discount — merged from Item Code (B, col 2) through
+  // Description (I, col 9), left + middle aligned. The template's own
+  // "Test cost"/"Discount" label lives in column A (the item-name column,
+  // matching every other data row's own convention) and is left as-is;
+  // this merge only unifies the otherwise-separate B:I cells into one
+  // blank, properly-aligned block.
   const testCostRow = finalSubtotalRow.PACKAGING - 2;
   const discountRow = finalSubtotalRow.PACKAGING - 1;
-  portwestMergeLeftLabel(ws, testCostRow, 1, 9);
-  portwestMergeLeftLabel(ws, discountRow, 1, 9);
+  portwestMergeAndAlign(ws, testCostRow, 2, 9, LEFT_MIDDLE_WRAP);
+  portwestMergeAndAlign(ws, discountRow, 2, 9, LEFT_MIDDLE_WRAP);
 
   const buffer = await workbook.xlsx.writeBuffer();
   return { buffer, counts, bucketedCounts: Object.fromEntries(order.map(k => [k, bucketed[k].length])) };

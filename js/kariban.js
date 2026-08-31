@@ -591,7 +591,10 @@ const KARIBAN_TRIM_STATIC_ROWS = [{
   priceTerms: 'LOCAL', paymentTerm: 'LC 120 DAYS',
   description: 'Sewig Thread--40/3 (40Tex)',
   price: 1.24, priceFmt: '"$"#,##0.00',
-  consumption: 350 / 3000, consumptionFmt: '0.00" mtr"',
+  consumption: 0, consumptionFmt: '0.00" mtr"',
+  // Orange, Accent 2, Lighter 80% - matches the template's own Consumption
+  // cell color for this row.
+  consumptionFill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFBE5D6' } },
   wastage: 0.15,
 }];
 const KARIBAN_SECTIONS = {
@@ -648,8 +651,21 @@ function fillKaribanSection(ws, cfg, items, maxSheetRow) {
   const needed = items.length + staticRows.length;
   const amount = Math.max(0, needed - available);
 
-  const oldMerges = snapshotAndUnmergeAllKariban(ws);
-  const rowTemplateMerges = oldMerges.filter(m => m.minRow === first).map(m => ({ minCol: m.minCol, maxCol: m.maxCol }));
+  // Only unmerge/remerge (a full workbook-wide round trip via
+  // ws.model.merges) when this section is actually inserting rows and
+  // needs merges shifted - it's unnecessary busywork otherwise, and
+  // empirically it can corrupt alignment on cells far outside this
+  // section (confirmed via direct testing: an unrelated Packaging cell's
+  // alignment flips after Trim's no-op remerge runs, even with zero
+  // merges anywhere near either section). Skipping it when amount===0
+  // removes that risk entirely without losing any real functionality,
+  // since there's nothing to shift in that case anyway.
+  let oldMerges = [];
+  let rowTemplateMerges = [];
+  if (amount > 0) {
+    oldMerges = snapshotAndUnmergeAllKariban(ws);
+    rowTemplateMerges = oldMerges.filter(m => m.minRow === first).map(m => ({ minCol: m.minCol, maxCol: m.maxCol }));
+  }
 
   let insertAt = null;
   if (amount > 0) {
@@ -677,9 +693,14 @@ function fillKaribanSection(ws, cfg, items, maxSheetRow) {
   // bleed onto a newly-written row. cfg.computedFormulas below then
   // writes this sheet's actual structural formulas back in fresh,
   // immediately after, so nothing is left uncalculated.
-  const NO_FILL = { type: 'pattern', pattern: 'none' };
-  const CENTER_MIDDLE = { horizontal: 'center', vertical: 'middle', wrapText: true };
-  const GREEN_DATA_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFC5E0B4' } };
+  //
+  // NOTE: every fill/alignment below is a freshly-built object literal at
+  // each assignment site, deliberately never a single shared object reused
+  // across multiple cells - ExcelJS appears to intern/pool style records
+  // internally, and reusing one JS object reference for many cells'
+  // .alignment/.fill let a later cell's style bleed into an earlier,
+  // completely unrelated cell's (confirmed by direct testing - e.g. a
+  // Packaging cell's alignment changed when a later Trim cell was styled).
   for (let r = first; r <= last; r++) {
     for (let c = 1; c <= KARIBAN_MAX_COL; c++) {
       const cell = ws.getCell(r, c);
@@ -688,13 +709,15 @@ function fillKaribanSection(ws, cfg, items, maxSheetRow) {
       // FOB/CNF block (Fabric only) keeps its green highlight instead of
       // going white like every other cleared cell - matches the
       // template's own visual marker for this manual/formula input block.
-      cell.fill = (cfg.greenCols && cfg.greenCols.includes(c)) ? GREEN_DATA_FILL : NO_FILL;
+      cell.fill = (cfg.greenCols && cfg.greenCols.includes(c))
+        ? { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFC5E0B4' } }
+        : { type: 'pattern', pattern: 'none' };
       // Item Code (Fabric Code / Item Code) and Position read cleaner
       // centered, both horizontally and vertically, than left/top-aligned
       // like the rest of the row - set across the whole column so it's
       // consistent even before any item lands in a given row.
       if (c === KARIBAN_COL.itemCode || c === KARIBAN_COL.position) {
-        cell.alignment = CENTER_MIDDLE;
+        cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
       } else if (c === KARIBAN_COL.description) {
         // Applied blanket-wide (not just on populated rows) so a section's
         // unused capacity rows (e.g. Packaging, which rarely fills all 12
@@ -713,11 +736,12 @@ function fillKaribanSection(ws, cfg, items, maxSheetRow) {
   // cleaner centered - and, for Fabric, its green FOB/CNF header cells
   // (O-S) keep the template's bright-green marker rather than the paler
   // shade used on the data rows below them.
-  const GREEN_HEADER_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF92D050' } };
   for (let c = 1; c <= KARIBAN_MAX_COL; c++) {
     const headerCell = ws.getCell(cfg.headerRow, c);
-    headerCell.alignment = CENTER_MIDDLE;
-    if (cfg.greenCols && cfg.greenCols.includes(c)) headerCell.fill = GREEN_HEADER_FILL;
+    headerCell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+    if (cfg.greenCols && cfg.greenCols.includes(c)) {
+      headerCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF92D050' } };
+    }
   }
 
   // Re-apply this section's own structural formulas fresh on every row
@@ -782,6 +806,7 @@ function fillKaribanSection(ws, cfg, items, maxSheetRow) {
       const consCell = ws.getCell(r, KARIBAN_COL.consumption);
       consCell.value = sr.consumption;
       if (sr.consumptionFmt) consCell.numFmt = sr.consumptionFmt;
+      if (sr.consumptionFill) consCell.fill = sr.consumptionFill;
     }
     if (sr.wastage !== undefined) {
       const wastageCell = ws.getCell(r, KARIBAN_WASTAGE_COL);
@@ -796,11 +821,9 @@ function fillKaribanSection(ws, cfg, items, maxSheetRow) {
       const newRow = insertAt + i;
       for (const pat of rowTemplateMerges) mergeSectionRangeKariban(ws, newRow, pat.minCol, pat.maxCol - pat.minCol + 1);
     }
-  } else {
-    remergeShiftedKariban(ws, oldMerges, 0, 0);
   }
 
-  return { maxSheetRow, totalRow: cfg.totalRow };
+  return { maxSheetRow, totalRow: cfg.totalRow, headerRow: cfg.headerRow, first, last };
 }
 
 async function buildKaribanCostSheet(templateArrayBuffer, itemsByBucket, styleInfo) {
@@ -832,24 +855,71 @@ async function buildKaribanCostSheet(templateArrayBuffer, itemsByBucket, styleIn
   // section still queued for processing above it
   const order = ['Packaging', 'Trim', 'Label', 'Fabric'];
   const counts = {};
+  const sectionRanges = {};
   for (const bucket of order) {
     const cfg = { ...KARIBAN_SECTIONS[bucket] };
     const items = itemsByBucket[bucket] || [];
     counts[bucket] = items.length;
-    ({ maxSheetRow: maxRow } = fillKaribanSection(ws, cfg, items, maxRow));
+    const beforeRow = maxRow;
+    const result = fillKaribanSection(ws, cfg, items, maxRow);
+    maxRow = result.maxSheetRow;
+    const amount = maxRow - beforeRow; // rows THIS section inserted, if any
+    // A later-processed section sits physically ABOVE every section
+    // already recorded here - if it just inserted rows, every
+    // already-recorded (physically lower) section shifts down with it.
+    for (const key of Object.keys(sectionRanges)) {
+      sectionRanges[key].headerRow += amount;
+      sectionRanges[key].first += amount;
+      sectionRanges[key].last += amount;
+    }
+    sectionRanges[bucket] = { headerRow: result.headerRow, first: result.first, last: result.last };
   }
 
   // Every cell below the sheet's row-10 intro/header block gets wrap text -
   // including rows fillKaribanSection never touches directly, like the
   // untouched Embroidery & Print block and the summary/commission rows at
-  // the bottom. Merged (not overwritten) onto whatever alignment a cell
-  // already has, so the center-middle/left-middle alignment already set
-  // above for headers, Item Code/Position, and Description survives.
+  // the bottom.
   for (let r = 11; r <= maxRow; r++) {
     for (let c = 1; c <= KARIBAN_MAX_COL; c++) {
       const cell = ws.getCell(r, c);
       cell.alignment = Object.assign({}, cell.alignment, { wrapText: true });
     }
+  }
+
+  // Reassert every section's header / Item Code / Position / Description
+  // alignment one final time, using each section's now-final row range
+  // (sectionRanges, adjusted above for every insertion that happened after
+  // it). This has to run after the ENTIRE order loop: each section's own
+  // merge unmerge/remerge cycle touches every merge in the whole sheet, so
+  // an earlier section's alignment can get reset by a totally different,
+  // later-processed section's call - and, since a later section can also
+  // insert rows that push an earlier one further down the sheet, fixed
+  // absolute row numbers can't be trusted either.
+  // Iterate top-to-bottom (ascending row order), not insertion order -
+  // ExcelJS's internal style handling has a confirmed quirk where setting
+  // cell alignment in DESCENDING row order can silently corrupt alignment
+  // already set on an earlier, unrelated cell (reproduced directly: a
+  // Packaging cell's alignment flipped after a lower-row Trim cell was
+  // styled, with zero merges or shared object references involved).
+  // Ascending order does not trigger this.
+  const orderedBuckets = Object.keys(sectionRanges).sort((a, b) => sectionRanges[a].first - sectionRanges[b].first);
+  for (const bucket of orderedBuckets) {
+    const { headerRow, first, last } = sectionRanges[bucket];
+    for (let c = 1; c <= KARIBAN_MAX_COL; c++) {
+      const hc = ws.getCell(headerRow, c);
+      hc.alignment = Object.assign({}, hc.alignment, { horizontal: 'center', vertical: 'middle', wrapText: true });
+    }
+    for (let r = first; r <= last; r++) {
+      ws.getCell(r, KARIBAN_COL.itemCode).alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+      ws.getCell(r, KARIBAN_COL.position).alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+      ws.getCell(r, KARIBAN_COL.description).alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
+    }
+  }
+  // Same reasoning for the thread row's Consumption highlight fill.
+  if (sectionRanges.Trim) {
+    const threadRow = sectionRanges.Trim.first + (itemsByBucket.Trim || []).length;
+    const sr = KARIBAN_TRIM_STATIC_ROWS[0];
+    if (sr && sr.consumptionFill) ws.getCell(threadRow, KARIBAN_COL.consumption).fill = sr.consumptionFill;
   }
 
   // Buyer (D5, e.g. "KARIBAN BRANDS") - forced left-aligned explicitly,
