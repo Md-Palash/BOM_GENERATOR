@@ -535,6 +535,21 @@ function mergeSectionRangeKariban(ws, row, minCol, width) {
   const rng = `${numToColLetterKariban(minCol)}${row}:${numToColLetterKariban(minCol + width - 1)}${row}`;
   try { ws.mergeCells(rng); } catch (e) {}
 }
+// Scans the sheet (ascending row order, so the first/topmost match wins)
+// for a cell whose plain-string value exactly matches `text`
+// (case/whitespace-insensitive). Used to find fixed template landmarks
+// (e.g. the "CM/Pc" row) whose absolute row number shifts whenever an
+// earlier section inserts rows.
+function findKaribanRowByExactText(ws, maxRow, maxCol, text) {
+  const target = text.trim().toLowerCase();
+  for (let r = 1; r <= maxRow; r++) {
+    for (let c = 1; c <= maxCol; c++) {
+      const v = ws.getCell(r, c).value;
+      if (typeof v === 'string' && v.trim().toLowerCase() === target) return r;
+    }
+  }
+  return null;
+}
 function base64ToArrayBufferKariban(base64) {
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
@@ -891,9 +906,15 @@ async function buildKaribanCostSheet(templateArrayBuffer, itemsByBucket, styleIn
 
   // Every cell below the sheet's row-10 intro/header block gets wrap text -
   // including rows fillKaribanSection never touches directly, like the
-  // untouched Embroidery & Print block and the summary/commission rows at
-  // the bottom.
-  for (let r = 11; r <= maxRow; r++) {
+  // untouched Embroidery & Print block - EXCEPT the summary/commission
+  // block at the very bottom (starting at the "CM/Pc" row, right after
+  // Packaging's Sub Total), which is intentionally left without wrap text
+  // per business rule. Located by searching for the literal cell text
+  // rather than a hardcoded row number, since section row-insertions above
+  // it shift it down.
+  const cmPcRow = findKaribanRowByExactText(ws, maxRow, KARIBAN_MAX_COL, 'CM/Pc');
+  const wrapEndRow = cmPcRow ? cmPcRow - 1 : maxRow;
+  for (let r = 11; r <= wrapEndRow; r++) {
     for (let c = 1; c <= KARIBAN_MAX_COL; c++) {
       const cell = ws.getCell(r, c);
       cell.alignment = Object.assign({}, cell.alignment, { wrapText: true });
@@ -952,45 +973,73 @@ async function buildKaribanCostSheet(templateArrayBuffer, itemsByBucket, styleIn
 
 /* ============================================================
    KARIBAN — SUPPLY CHAIN SHEET
-   Multiple tech packs at once -> one flat sheet: Style No | Item Code |
-   Description | Picture | Supplier. Blank row after every style's block.
-   Duplicate items (same Item Code) are kept only once, globally, across
-   every style processed in the same run. Zipper merge follows the same
-   5-part rule as the Cost Sheet.
+   Multiple tech packs at once -> two tabs:
+     - "Fabrics": Style No | Fabric Category | Fabric Code | Description |
+       Supplier (no Picture column - not applicable to fabric rows)
+     - "Trims": every non-Fabric item (Trim / Label / Packaging) - Style No |
+       Item Code | Description | Picture | Supplier, unchanged from before
+   No blank separator row between styles - each tab is just the deduped
+   row list. Duplicate items (same normalized Description) are kept only
+   once per tab, globally across every style processed in the same run.
+   Zipper merge follows the same 5-part rule as the Cost Sheet.
    ============================================================ */
 
 async function buildKaribanSupplyChainWorkbook(sessions) {
   // sessions: [{ styleCode, items: [...] }]
   const wb = new ExcelJS.Workbook();
-  const ws = wb.addWorksheet('Supply Chain');
-  ws.columns = [
+  const fabricWs = wb.addWorksheet('Fabrics');
+  const trimsWs = wb.addWorksheet('Trims');
+
+  fabricWs.columns = [
+    { header: 'Style No', key: 'style', width: 20 },
+    // "Fabric Category" has no defined source in extraction (same
+    // situation as the "Item" column elsewhere - nothing in the tech pack
+    // reliably maps to it), so it's left blank for manual entry rather
+    // than guessed.
+    { header: 'Fabric Category', key: 'category', width: 20 },
+    { header: 'Fabric Code', key: 'code', width: 26 },
+    { header: 'Description', key: 'desc', width: 85 },
+    { header: 'Supplier', key: 'supplier', width: 22 },
+  ];
+  trimsWs.columns = [
     { header: 'Style No', key: 'style', width: 20 },
     { header: 'Item Code', key: 'code', width: 26 },
     { header: 'Description', key: 'desc', width: 85 },
     { header: 'Picture', key: 'pic', width: 16 },
     { header: 'Supplier', key: 'supplier', width: 22 },
   ];
-  ws.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
-  ws.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2563EB' } };
-  ws.views = [{ state: 'frozen', ySplit: 1 }];
+  [fabricWs, trimsWs].forEach(ws => {
+    ws.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    ws.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2563EB' } };
+    ws.views = [{ state: 'frozen', ySplit: 1 }];
+  });
 
-  const seenGlobal = new Set(); // dedupe by normalized Description across every style in this run
+  const seenFabric = new Set(); // dedupe by normalized Description, Fabric tab only
+  const seenTrims = new Set();  // dedupe by normalized Description, Trims tab only
+  let fabricWritten = 0, trimsWritten = 0;
+
   for (const session of sessions) {
-    let wroteAny = false;
     for (const item of session.items) {
       const key = karibanDedupeKey(item.description);
-      if (!key || seenGlobal.has(key)) continue;
-      seenGlobal.add(key);
-      const row = ws.addRow({ style: session.styleCode, code: item.code, desc: item.description, pic: '', supplier: '' });
-      // Wrap long descriptions instead of letting them overflow past the
-      // column width, so the sheet stays readable at a glance.
-      row.getCell('desc').alignment = { wrapText: true, vertical: 'top' };
-      wroteAny = true;
+      if (!key) continue;
+      if (item.bucket === 'Fabric') {
+        if (seenFabric.has(key)) continue;
+        seenFabric.add(key);
+        const row = fabricWs.addRow({ style: session.styleCode, category: '', code: item.code, desc: item.description, supplier: '' });
+        row.getCell('desc').alignment = { wrapText: true, vertical: 'top' };
+        fabricWritten++;
+      } else {
+        if (seenTrims.has(key)) continue;
+        seenTrims.add(key);
+        const row = trimsWs.addRow({ style: session.styleCode, code: item.code, desc: item.description, pic: '', supplier: '' });
+        row.getCell('desc').alignment = { wrapText: true, vertical: 'top' };
+        trimsWritten++;
+      }
     }
-    if (wroteAny) ws.addRow({}); // blank separator after this style's block
   }
 
-  return await wb.xlsx.writeBuffer();
+  const buffer = await wb.xlsx.writeBuffer();
+  return { buffer, fabricWritten, trimsWritten };
 }
 
 /* ============================================================
@@ -1249,9 +1298,10 @@ processBtnKaribanSupply.addEventListener('click', async () => {
     if (totalItems === 0) {
       setStatusKaribanSupply('No Fabrics / Trims / Label / Packaging items were found in these PDFs.', 'err');
     } else {
-      currentKaribanSupplyBuffer = await buildKaribanSupplyChainWorkbook(sessions);
+      const { buffer, fabricWritten, trimsWritten } = await buildKaribanSupplyChainWorkbook(sessions);
+      currentKaribanSupplyBuffer = buffer;
       const styleList = sessions.map(s => s.styleCode).join(', ');
-      countsKaribanSupply.textContent = `${sessions.length} tech pack(s) processed — Style${sessions.length > 1 ? 's' : ''}: ${styleList}. Duplicate items (same Item Code) are kept once, across every style.`;
+      countsKaribanSupply.textContent = `${sessions.length} tech pack(s) processed — Style${sessions.length > 1 ? 's' : ''}: ${styleList}. Fabrics: ${fabricWritten}, Trims: ${trimsWritten}. Duplicate items (same Description) are kept once per tab, across every style.`;
       resultsKaribanSupply.classList.add('show');
       setStatusKaribanSupply(`Done — processed ${sessions.length} tech pack(s).`, 'ok');
     }
