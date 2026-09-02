@@ -203,6 +203,32 @@ function isPortwestBoilerplateLine(line) {
   return PORTWEST_BOILERPLATE_RE.test(text);
 }
 
+// Some tech packs paginate a very wide Placements table (more colorway
+// columns than fit on one page width) into a PAIR of pages: the first has
+// the full row content (Placement...Comment plus as many colorway columns
+// as fit), and the immediately-following page repeats the SAME rows with
+// only Placement/Level/MainMaterial/Code plus the single overflow colorway
+// column that didn't fit — confirmed directly against a real tech pack
+// (e.g. page N shows "...Comment | Orange/Black | ... | Red/Black" and
+// page N+1 shows only "Placement | Level | MainMaterial | Code |
+// Yellow/Grey" for the identical set of rows, both pages sharing the same
+// "Displaying X - Y of N results" footer). That continuation page carries
+// no data this tool needs — everything on it duplicates the page before —
+// but if it isn't recognised, its rows (which DO have non-empty Placement
+// and Code, since those columns are still present) get treated as
+// brand-new rows: either bogus near-empty duplicate entries, or worse,
+// their stray text fragments merge into the FOLLOWING real row as a false
+// "wrapped continuation", corrupting genuine data (confirmed to produce
+// smashed-together codes and mislabeled placements). Detected by the
+// simple, reliable signal that a genuine full data page's header always
+// includes a "Description" and a "UOM" column, and a colorway-overflow
+// continuation page never does.
+function portwestHeaderLooksLikeContinuation(headerItems) {
+  const hasDescription = headerItems.some(it => it.text.startsWith('Descr'));
+  const hasUom = headerItems.some(it => it.text.startsWith('UOM'));
+  return !hasDescription && !hasUom;
+}
+
 function portwestBlankRow() {
   return { placement: '', mainMaterial: '', code: '', image: '', product: '', description: '',
     composition: '', materialWeight: '', commonSize: '', qtyDefault: '', uom: '', position: '', comment: '' };
@@ -280,6 +306,10 @@ async function extractPortwestPdf(file, onProgress) {
     // been seen — the header is confirmed to repeat on every page without
     // exception, so this cleanly discards all pre-header boilerplate.
     let sawHeaderOnThisPage = false;
+    // Set once this page's own header is identified as a colorway-overflow
+    // continuation page (see portwestHeaderLooksLikeContinuation) — once
+    // true, every remaining line on this page is discarded.
+    let pageIsContinuation = false;
 
     for (const line of lines) {
       if (isPortwestBoilerplateLine(line)) continue;
@@ -326,18 +356,31 @@ async function extractPortwestPdf(file, onProgress) {
         }
         headerCollecting = false;
         sawHeaderOnThisPage = true;
-        // The header layout is structurally identical on every page (it's
-        // literally the same repeated table header), so once derived
-        // successfully there's no need to re-parse and re-anchor it on
-        // each of the (possibly 20+) subsequent pages — a real saving on
-        // a long tech pack. Only re-derive if we don't already have it.
-        if (!columnBoundaries) {
+
+        // A colorway-overflow continuation page repeats the same rows as
+        // the page before it, with none of the columns this tool actually
+        // needs — skip the rest of this page entirely rather than risk
+        // misreading its rows as new data or letting stray fragments merge
+        // into the next real row. Checked BEFORE attempting derivation, so
+        // a continuation page never touches columnBoundaries at all.
+        if (portwestHeaderLooksLikeContinuation(headerItemsBuf)) {
+          pageIsContinuation = true;
+        } else if (!columnBoundaries) {
+          // The header layout is structurally identical on every full data
+          // page (it's literally the same repeated table header), so once
+          // derived successfully there's no need to re-parse and re-anchor
+          // it on each of the (possibly 20+) subsequent pages — a real
+          // saving on a long tech pack. Only re-derive if we don't already
+          // have it.
           columnBoundaries = derivePortwestColumnBoundaries(headerItemsBuf) ||
             portwestColumnsFromFractions(viewport.width);
         }
         // Fall through — this line itself still needs normal processing
-        // below (it may be a category tag or a plain data row).
+        // below (it may be a category tag or a plain data row), unless
+        // this turned out to be a continuation page, handled just below.
       }
+
+      if (pageIsContinuation) continue; // discard every remaining line on a colorway-overflow continuation page
 
       if (!sawHeaderOnThisPage) continue; // pre-header boilerplate (title, banner, "Displaying..." counter)
 
@@ -360,21 +403,24 @@ async function extractPortwestPdf(file, onProgress) {
         cols[key] = (cols[key] ? cols[key] + ' ' : '') + it.text;
       }
 
-      // New logical row starts when this line has content in BOTH the
-      // Placement column (leftmost) AND the Code column. Checking
-      // Placement alone is not enough: a long Placement label (e.g.
-      // "Reflective Tape", "Hook & Loop", "Oeko-Tex Label") can itself
-      // wrap onto a second physical line, and that wrapped remainder
-      // ("Tape", "Loop", "Label") still lands in the Placement column on
-      // its own line — confirmed against the sample PDF's coordinates.
-      // Code, by contrast, is short and never wraps, so it's only ever
-      // present on a row's true first line. Requiring both avoids
-      // splitting one wrapped-label row into two bogus rows (and
-      // corrupting the real row's data in the process). Any other
+      // New logical row starts when this line has content in the Code
+      // column. Code alone (not Code AND Placement) is the right signal:
+      // Code is short and never wraps, so it's only ever present on a
+      // row's true first line — a long Placement label (e.g. "Reflective
+      // Tape", "Hook & Loop", "Oeko-Tex Label") can itself wrap onto a
+      // second physical line, and that wrapped remainder ("Tape", "Loop",
+      // "Label") lands in the Placement column with an empty Code, so it's
+      // still correctly treated as a continuation under a Code-only check.
+      // Requiring Placement too (an earlier version of this check) missed
+      // genuine rows whose Placement column ships legitimately blank in
+      // the source tech pack (confirmed: a Carton line item with Level/
+      // Code/weight/UOM/position all present but no Placement text) —
+      // those got silently merged into the previous row, smashing both
+      // rows' Code/weight/UOM together into one corrupted entry. Any other
       // wrapped field (Description/Position most commonly run onto extra
-      // lines) still has neither Placement nor Code, so it's correctly
-      // treated as a continuation either way.
-      if (cols.placement.trim() && cols.code.trim()) {
+      // lines) still has an empty Code, so it's correctly treated as a
+      // continuation either way.
+      if (cols.code.trim()) {
         flushRow();
         activeRow = portwestBlankRow();
         for (const k of Object.keys(cols)) activeRow[k] = cols[k].trim();
@@ -515,10 +561,42 @@ function portwestSanitizeSheetName(name) {
   return (name || '').replace(/[\\/?*[\]:]/g, '-').trim().slice(0, 31) || 'Sheet1';
 }
 
-// Unmerging a range that isn't actually merged throws in ExcelJS — this
-// just swallows that so callers don't need to track merge state themselves.
-function portwestSafeUnmerge(ws, row, fromCol, toCol) {
-  try { ws.unMergeCells(row, fromCol, row, toCol); } catch (e) { /* wasn't merged — fine */ }
+// Unmerging via ws.unMergeCells(row, fromCol, row, toCol) turns out to be
+// unreliable after this file's multiple cascaded spliceRows calls: ExcelJS
+// tracks merges in an internal ws._merges map keyed by the merge's ORIGINAL
+// top-left address (e.g. "A18"), but after a row shifts down (say to row
+// 23), that map's key is never renamed even though the Range object it
+// points to gets its own row numbers updated in place. ws.unMergeCells
+// looks up merges via the CELL's current live address (now "A23"), which
+// no longer matches the stale "A18" key — so the lookup silently misses,
+// nothing gets unmerged, and a later ws.mergeCells() at that same live
+// address throws "Cannot merge already merged cells" because the merge
+// object (still tracked, just under its stale key) genuinely still covers
+// that row. Confirmed directly against a real multi-section tech pack
+// extraction (66 BOM rows) — this is not a hypothetical edge case.
+//
+// This works around it by ignoring keys entirely: scan every merge
+// currently tracked, and if its own (live, correctly-updated) row/column
+// span overlaps our target range, unmerge every cell in THAT recorded
+// span directly and drop it from the registry — regardless of what key
+// it's currently filed under.
+function portwestForceClearIntersectingMerges(ws, row, fromCol, toCol) {
+  const merges = ws._merges;
+  if (!merges) return;
+  for (const key of Object.keys(merges)) {
+    const merge = merges[key];
+    if (!merge) continue;
+    const overlapsRow = row >= merge.top && row <= merge.bottom;
+    const overlapsCol = fromCol <= merge.right && toCol >= merge.left;
+    if (!overlapsRow || !overlapsCol) continue;
+    for (let r = merge.top; r <= merge.bottom; r++) {
+      for (let c = merge.left; c <= merge.right; c++) {
+        const cell = ws.getCell(r, c);
+        if (cell && typeof cell.unmerge === 'function') cell.unmerge();
+      }
+    }
+    delete merges[key];
+  }
 }
 
 // Merges a FIXED, explicitly-given column range in a row into one cell and
@@ -552,8 +630,17 @@ function portwestMergeAndAlign(ws, row, fromCol, toCol, alignment) {
     if (!label && typeof cell.value === 'string' && cell.value.trim()) label = cell.value.trim();
     cell.value = null;
   }
-  portwestSafeUnmerge(ws, row, fromCol, toCol);
-  ws.mergeCells(row, fromCol, row, toCol);
+  portwestForceClearIntersectingMerges(ws, row, fromCol, toCol);
+  try {
+    ws.mergeCells(row, fromCol, row, toCol);
+  } catch (e) {
+    // Last-resort safety net: if some other still-unaccounted-for merge
+    // slipped through the force-clear above, don't let one row's styling
+    // failure abort the entire Cost Sheet generation — leave that row's
+    // cells unmerged (still readable, just not centered as one cell) and
+    // continue with the rest of the file.
+    console.error(`portwestMergeAndAlign: could not merge row ${row} cols ${fromCol}-${toCol}: ${e.message}`);
+  }
   const merged = ws.getCell(row, fromCol);
   if (label) merged.value = label;
   merged.style = Object.assign({}, merged.style, { alignment });
