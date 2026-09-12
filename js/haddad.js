@@ -180,6 +180,15 @@ function extractFromPageItems(items, pageNum){
   const typeIdx = typeField ? fields.indexOf(typeField) : -1;
   const sizeScaleIdx = fields.indexOf('Size scale');
   const quantityIdx = fields.indexOf('Quantity');
+  // Field name varies by section ("Location/Placement" for Trim, just
+  // "Placement" for Labels & packaging) - match on either word so both
+  // resolve to the same signal. Used by mergeZipperItems: rows sharing
+  // the exact same physical placement (e.g. "@CF OPENING") are almost
+  // always genuinely the same zipper's own parts, which is a far more
+  // reliable "still part of this group" signal than guessing from Type/
+  // Name keywords, since it doesn't depend on how any given buyer happens
+  // to word the Type field.
+  const locationIdx = fields.findIndex(f => /location|placement/i.test(f));
 
   for (let c=0;c<numCols;c++){
     const fieldTexts = cols[c].map(tokens=>{
@@ -234,6 +243,9 @@ function extractFromPageItems(items, pageNum){
       // Raw Quantity field text (e.g. "1", "2") - the merge step turns this
       // into the +5% consumption value written to the Accessories sheet.
       _quantity: quantityIdx >= 0 ? (fieldTexts[quantityIdx] || '') : '',
+      // Raw Location/Placement field text (e.g. "@CF OPENING") - see
+      // mergeZipperItems for why this matters.
+      _location: locationIdx >= 0 ? (fieldTexts[locationIdx] || '') : '',
       // Identifies colorway-variant columns that belong to the same
       // physical slot (e.g. 4 shank-hardware colors, all "CENTER
       // SHANK-SINGLE PRONG" / "27 LIGNE (L)" / "@ CF CLOSURE", differing
@@ -271,40 +283,64 @@ function filterCanadaItems(results){
 // are usually identical across every size tier (one teeth column, one tape
 // column, etc. shared by all sizes); when a part instead has its own
 // column per size tier, that's visible the same way as everywhere else -
-// via that part's own Size scale field - so this now produces one combined
-// row per distinct grouping found among the parts, instead of keeping only
-// the "biggest size" grouping and discarding the rest.
+// via that part's own Size scale field - so this produces one combined row
+// per distinct grouping found among the parts, instead of keeping only the
+// "biggest size" grouping and discarding the rest.
+//
+// Two-part design, after real tech packs turned up a class of failures
+// keyword-only classification can't reliably avoid:
+//  1. GROUP BOUNDARY (which rows even belong to this zipper): primarily
+//     decided by comparing each row's own Location/Placement text (e.g.
+//     "@CF OPENING") against the group's - rows sharing the exact same
+//     physical placement are almost always genuinely the same zipper's
+//     own parts, regardless of how any given buyer happens to word the
+//     Type field. This is far more reliable than keyword-guessing, and
+//     is why an unrelated item that merely reuses a generic Type label
+//     (e.g. a hangtag loop typed just "TAPE", sitting right after a real
+//     zipper block) no longer gets swallowed into the merge - its
+//     Location/Placement text is different. Falls back to the previous
+//     keyword-based heuristic only when Location/Placement wasn't
+//     captured for one or both rows being compared.
+//  2. PART IDENTITY (once a group is settled, which rows are the "same"
+//     physical part vs "different" parts, e.g. two different sliders
+//     used for two different sizes vs the shared teeth/tape): decided by
+//     grouping rows with the same column heading (or Type text, if no
+//     heading was captured) into their own bucket, dynamically, instead
+//     of forcing every row into one of four hardcoded teeth/slider/tape/
+//     leftover buckets. The old fixed-bucket approach silently dropped a
+//     whole part whenever its Type/Name wording didn't match any of the
+//     three keyword patterns (e.g. teeth named "ZIPPER-EXPOSED METAL",
+//     a puller named plain "ZIPPER PULL") - two differently-named,
+//     unmatched parts would both fall into the same catch-all "leftover"
+//     bucket, which can only surface one representative item, silently
+//     losing the other. Dynamic identity buckets mean every distinct
+//     part - however it's worded, and however many size-specific variants
+//     it has - gets its own bucket and is never silently dropped.
 function mergeZipperItems(results){
   const ZIPPER_RE = /zipper|zip\b/i;
-  const TEETH_RE = /teeth|chain/i;
-  // Some buyers/products name the puller "PULL" outright (e.g. "ZIPPER
-  // PULL", "EMBOSS RAISED A&F ZIP PULL") rather than "PULLER" - \bpull\b
-  // catches that standalone word too, while the word boundaries still
-  // keep it from matching unrelated words like "PULLOVER".
-  const SLIDER_RE = /puller|slider|pull(?:\s|-)?tab|\bpull\b/i;
-  const TAPE_RE = /tape/i;
+  // Loose "this could plausibly be a zipper sub-part" signal, used only
+  // as a fallback when Location/Placement data isn't available to settle
+  // the question more reliably (see design note above).
   const PART_RE = /tape|teeth|chain|puller|slider|pull(?:\s|-)?tab|\bpull\b/i;
 
-  // Classification signal for which physical zipper part a row is: Type
-  // and Name text first, but ALSO the column heading printed directly
-  // above that row's own column (e.g. "CF ZIPPER TEETH", "CF ZIPPER
-  // PULL") - some products give the teeth/puller generic Type/Name text
-  // ("ZIPPER-EXPOSED METAL" / "OPEN-END EXPOSED METAL" for teeth, with no
-  // literal "teeth" anywhere) but the column heading itself always names
-  // the part explicitly, since that's the whole reason it's printed.
-  // Checking the header too is purely additive - a blank header never
-  // matches anything, so this can only recover matches Type/Name missed,
-  // never introduce a false one where Type/Name alone would've been fine.
-  function partText(g){ return `${g._type || ''} ${g._name || ''} ${g._columnHeader || ''}`; }
-
-  // A bucket with just one part is shared by every size grouping, exactly
-  // as before. A bucket with several parts picks the one whose own Size
-  // scale matches this particular grouping (falls back to the first part
-  // if none match exactly).
+  // A bucket with just one part is shared by every size grouping. A
+  // bucket with several parts (size-specific variants of that one part)
+  // picks the one whose own Size scale matches this particular grouping
+  // (falls back to the first part if none match exactly).
   function pickForGroup(bucket, key){
     if (bucket.length === 0) return null;
     if (bucket.length === 1) return bucket[0];
     return bucket.find(it => normSize(it._sizeScale) === key) || bucket[0];
+  }
+
+  // Which physical part a row represents, for bucketing purposes: the
+  // column heading if one was captured (the tech pack's own explicit
+  // label for that column, e.g. "CF ZIPPER TEETH" / "CF ZIPPER PULL" -
+  // the most reliable, buyer-agnostic signal available), otherwise the
+  // row's own Type text as a fallback.
+  function partIdentity(g){
+    const header = (g._columnHeader || '').trim();
+    return norm(header || g._type || g._name || '');
   }
 
   const out = [];
@@ -316,49 +352,50 @@ function mergeZipperItems(results){
     if (isZipperPart){
       const group = [r];
       let j = i + 1;
+      const rLoc = norm(r._location || '');
       while (j < results.length && results[j].section === r.section){
         const jItem = results[j];
-        const directZipperMention = ZIPPER_RE.test(jItem._type) || ZIPPER_RE.test(jItem._name);
-        if (directZipperMention){
-          group.push(jItem);
-          j++;
-          continue;
+        const jLoc = norm(jItem._location || '');
+        if (rLoc && jLoc){
+          // Both sides have real placement data - let it decide outright.
+          // Same placement -> definitely still this zipper, regardless of
+          // wording. Different placement -> definitely a different item,
+          // even if it happens to share a generic part keyword.
+          if (jLoc === rLoc){ group.push(jItem); j++; continue; }
+          break;
         }
+        // Placement data missing on one or both sides - fall back to the
+        // previous keyword-based heuristic.
+        const directZipperMention = ZIPPER_RE.test(jItem._type) || ZIPPER_RE.test(jItem._name);
+        if (directZipperMention){ group.push(jItem); j++; continue; }
         const looksLikePart = PART_RE.test(jItem._type) || PART_RE.test(jItem._name);
         if (!looksLikePart) break;
-        // A generic part-keyword match alone (e.g. Type "TAPE") isn't
-        // enough to continue the group if this row has its OWN column
-        // heading and that heading clearly names something unrelated
-        // (e.g. "HANGTAG LOOP") rather than a zipper sub-part - some
-        // buyers reuse generic Type labels like "TAPE" for entirely
-        // different trims, and without this check that next unrelated
-        // item gets silently swallowed into the zipper merge and lost.
-        // A blank heading is not treated as contradicting evidence -
-        // some products never populate this field, so falling back to
-        // the plain part-keyword match (as before) is still correct then.
         const header = (jItem._columnHeader || '').trim();
         if (header && !ZIPPER_RE.test(header)) break;
         group.push(jItem);
         j++;
       }
       if (group.length > 1){
-        const teethBucket = group.filter(g => TEETH_RE.test(partText(g)));
-        const sliderBucket = group.filter(g => SLIDER_RE.test(partText(g)) && !teethBucket.includes(g));
-        const tapeBucket = group.filter(g => TAPE_RE.test(partText(g)) && !teethBucket.includes(g) && !sliderBucket.includes(g));
-        const leftover = group.filter(g => !teethBucket.includes(g) && !sliderBucket.includes(g) && !tapeBucket.includes(g));
-        const allBuckets = [teethBucket, sliderBucket, tapeBucket, leftover];
+        const partBuckets = [];
+        const byIdentity = new Map();
+        for (const g of group){
+          const key = partIdentity(g);
+          let bucket = byIdentity.get(key);
+          if (!bucket){ bucket = []; byIdentity.set(key, bucket); partBuckets.push(bucket); }
+          bucket.push(g);
+        }
 
         // Only a bucket that actually has more than one part can express a
         // real size split; a lone shared part shouldn't manufacture an
         // extra grouping just because its own Size scale happens to differ
         // in wording from another bucket's.
-        const splitBuckets = allBuckets.filter(b => b.length > 1);
+        const splitBuckets = partBuckets.filter(b => b.length > 1);
         const groupKeys = splitBuckets.length
           ? [...new Set(splitBuckets.flatMap(b => b.map(it => normSize(it._sizeScale))))]
           : [normSize(r._sizeScale)];
 
         for (const key of groupKeys){
-          const chosen = allBuckets.map(bucket => pickForGroup(bucket, key)).filter(Boolean);
+          const chosen = partBuckets.map(bucket => pickForGroup(bucket, key)).filter(Boolean);
           if (chosen.length === 0) continue;
           out.push({
             section: r.section,
@@ -370,6 +407,7 @@ function mergeZipperItems(results){
             extractedInfo: chosen.map(g=>g.extractedInfo).filter(Boolean).join(' + '),
             _type: 'ZIPPER', _name: r._name,
             _sizeScale: key,
+            _location: r._location,
             _groupKey: '', // already a single combined item - not subject to group-key dedup
             // The combined zipper is one physical unit - its consumption is
             // driven by the first chosen part's own Quantity (normally the
@@ -407,7 +445,9 @@ function stripInternalFields(results){
   // heading printed above the item's own column in the tech pack, e.g.
   // "CF ZIPPER"), rather than the item's own descriptive Name field value
   // (e.g. "#5 OPEN END VISLON"). Unused by the BOM / Cost Break Down path.
-  return results.map(({ _type, _name, _columnHeader, ...rest }) => ({ ...rest, columnHeader: (_columnHeader || '').trim() }));
+  // _location is only needed by mergeZipperItems (which runs before this)
+  // and is dropped here along with the other internal-only fields.
+  return results.map(({ _type, _name, _columnHeader, _location, ...rest }) => ({ ...rest, columnHeader: (_columnHeader || '').trim() }));
 }
 
 // Fixed placement (in PDF points, page 1) of the product sketch image in
