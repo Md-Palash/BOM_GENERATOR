@@ -289,149 +289,168 @@ function filterCanadaItems(results){
 //
 // Two-part design, after real tech packs turned up a class of failures
 // keyword-only classification can't reliably avoid:
-//  1. GROUP BOUNDARY (which rows even belong to this zipper): primarily
-//     decided by comparing each row's own Location/Placement text (e.g.
-//     "@CF OPENING") against the group's - rows sharing the exact same
-//     physical placement are almost always genuinely the same zipper's
-//     own parts, regardless of how any given buyer happens to word the
-//     Type field. This is far more reliable than keyword-guessing, and
-//     is why an unrelated item that merely reuses a generic Type label
-//     (e.g. a hangtag loop typed just "TAPE", sitting right after a real
-//     zipper block) no longer gets swallowed into the merge - its
-//     Location/Placement text is different. Falls back to the previous
-//     keyword-based heuristic only when Location/Placement wasn't
-//     captured for one or both rows being compared.
-//  2. PART IDENTITY (once a group is settled, which rows are the "same"
-//     physical part vs "different" parts, e.g. two different sliders
-//     used for two different sizes vs the shared teeth/tape): decided by
-//     grouping rows with the same column heading (or Type text, if no
-//     heading was captured) into their own bucket, dynamically, instead
-//     of forcing every row into one of four hardcoded teeth/slider/tape/
-//     leftover buckets. The old fixed-bucket approach silently dropped a
-//     whole part whenever its Type/Name wording didn't match any of the
-//     three keyword patterns (e.g. teeth named "ZIPPER-EXPOSED METAL",
-//     a puller named plain "ZIPPER PULL") - two differently-named,
-//     unmatched parts would both fall into the same catch-all "leftover"
-//     bucket, which can only surface one representative item, silently
-//     losing the other. Dynamic identity buckets mean every distinct
-//     part - however it's worded, and however many size-specific variants
-//     it has - gets its own bucket and is never silently dropped.
+//  1. WHICH ROWS ARE ZIPPER-RELATED AT ALL: a row counts if its own Type/
+//     Name/column heading directly says "zipper" (the overwhelmingly
+//     common case - teeth, tape, and puller items almost always mention
+//     it somewhere in their own text, however else they're worded). This
+//     is checked across the WHOLE section, not just a run of consecutive
+//     rows - a style can have two physical zippers (e.g. one at CF, one
+//     at a chest pocket) whose own teeth sit many rows apart, with
+//     entirely unrelated trims (interfacing, bartacks) printed between
+//     them, and a purely consecutive scan can never reach the second one.
+//     A row with no "zipper" wording of its own (e.g. a bare "PULLER")
+//     can still qualify via a narrow fallback: it must both look like a
+//     generic part (tape/teeth/puller keyword) AND sit within a couple of
+//     rows of one that does say "zipper", AND - if both have Location/
+//     Placement data - that location must be compatible (one containing
+//     the other), so an unrelated item that merely reuses a generic Type
+//     label right next to a real zipper (e.g. a hangtag loop typed just
+//     "TAPE") still isn't swept in.
+//  2. WHICH PHYSICAL ZIPPER a given zipper-related row belongs to, once
+//     collected: decided from Location/Placement text. A part specific to
+//     one zipper lists just that zipper's own location (e.g. "@ CF"); a
+//     part SHARED between multiple zippers (a common pattern: one tape
+//     and one puller code reused at both a CF zip and a chest pocket
+//     zip) lists every location it's used at together in one combined
+//     field (e.g. "@ CF ZIP, @ CHEST POCKET ZIP") - so the real, distinct
+//     physical zippers are whichever location strings are NOT themselves
+//     a combined/superset listing of some other location also present.
+//     A shared part then belongs to (and is copied into) every zipper
+//     whose location it lists. Within each physical zipper's own set of
+//     parts, further split by Size scale if a part has size-specific
+//     variants (e.g. a different puller per size) - grouping by column
+//     heading (or Type text, if no heading was captured) so two
+//     differently-worded parts never collide into one bucket and lose
+//     one silently, the way a single hardcoded teeth/slider/tape/leftover
+//     bucket set used to.
 function mergeZipperItems(results){
   const ZIPPER_RE = /zipper|zip\b/i;
-  // Loose "this could plausibly be a zipper sub-part" signal, used only
-  // as a fallback when Location/Placement data isn't available to settle
-  // the question more reliably (see design note above).
   const PART_RE = /tape|teeth|chain|puller|slider|pull(?:\s|-)?tab|\bpull\b/i;
 
-  // A bucket with just one part is shared by every size grouping. A
-  // bucket with several parts (size-specific variants of that one part)
-  // picks the one whose own Size scale matches this particular grouping
-  // (falls back to the first part if none match exactly).
   function pickForGroup(bucket, key){
     if (bucket.length === 0) return null;
     if (bucket.length === 1) return bucket[0];
     return bucket.find(it => normSize(it._sizeScale) === key) || bucket[0];
   }
-
-  // Which physical part a row represents, for bucketing purposes: the
-  // column heading if one was captured (the tech pack's own explicit
-  // label for that column, e.g. "CF ZIPPER TEETH" / "CF ZIPPER PULL" -
-  // the most reliable, buyer-agnostic signal available), otherwise the
-  // row's own Type text as a fallback.
   function partIdentity(g){
     const header = (g._columnHeader || '').trim();
     return norm(header || g._type || g._name || '');
   }
+  function buildMergedRow(chosen, sizeKey){
+    return {
+      section: chosen[0].section,
+      page: chosen[0].page,
+      itemName: chosen.map(g=>g.itemName).filter(Boolean).join(' + '),
+      internalCode: chosen.map(g=>g.internalCode).filter(Boolean).join(' + '),
+      supplier: chosen.map(g=>g.supplier).filter(Boolean).join(' + '),
+      unit: 'PCS',
+      extractedInfo: chosen.map(g=>g.extractedInfo).filter(Boolean).join(' + '),
+      _type: 'ZIPPER', _name: chosen[0]._name,
+      _sizeScale: sizeKey,
+      _location: chosen[0]._location,
+      _groupKey: '', // already a single combined item - not subject to group-key dedup
+      // The combined zipper is one physical unit - its consumption is
+      // driven by the first chosen part's own Quantity (normally the
+      // teeth, since that's what's present in virtually every group).
+      _quantity: chosen[0] ? chosen[0]._quantity : '',
+      // One physical slot has one printed heading (e.g. "CF ZIPPER"),
+      // even though its teeth/tape/puller parts sit in separate PDF
+      // columns that may each pick up their own fragment of header text.
+      // Prefer the group's first part's header; fall back to the first
+      // non-blank header found anywhere else in the group rather than
+      // concatenating every part's header together, which would read as
+      // a run-on mess.
+      _columnHeader: (chosen[0]._columnHeader && chosen[0]._columnHeader.trim())
+        || ((chosen.find(g => g._columnHeader && g._columnHeader.trim()) || {})._columnHeader || ''),
+    };
+  }
+
+  // Process one section's rows at a time - zipper grouping should never
+  // cross a section boundary (e.g. Trim vs Labels & packaging).
+  const bySection = new Map();
+  results.forEach((r, idx) => {
+    if (!bySection.has(r.section)) bySection.set(r.section, []);
+    bySection.get(r.section).push({ r, idx });
+  });
+
+  const skip = new Set();       // original indices consumed into a merged row
+  const insertAt = new Map();   // original index -> merged rows to splice in there
+
+  for (const entries of bySection.values()){
+    const sectionRows = entries.map(e => e.r);
+
+    const isZipperRelated = sectionRows.map((r, idx) => {
+      if (ZIPPER_RE.test(r._type) || ZIPPER_RE.test(r._name) || ZIPPER_RE.test(r._columnHeader)) return true;
+      if (!(PART_RE.test(r._type) || PART_RE.test(r._name))) return false;
+      const window = sectionRows.slice(Math.max(0, idx - 2), idx + 3);
+      const neighbor = window.find(x => x !== r && (ZIPPER_RE.test(x._type) || ZIPPER_RE.test(x._name)));
+      if (!neighbor) return false;
+      const rLoc = norm(r._location || '');
+      const nLoc = norm(neighbor._location || '');
+      if (rLoc && nLoc && !(rLoc.includes(nLoc) || nLoc.includes(rLoc))) return false;
+      return true;
+    });
+
+    const zipperRows = sectionRows.filter((r, idx) => isZipperRelated[idx]);
+    if (zipperRows.length < 2) continue; // nothing to merge in this section
+
+    // Distinct physical zipper locations = whichever location strings are
+    // NOT themselves a combined listing that contains some other location
+    // also present (see design note above).
+    const distinctLocs = [...new Set(zipperRows.map(r => norm(r._location || '')).filter(Boolean))];
+    let anchors = distinctLocs.filter(loc => !distinctLocs.some(other => other !== loc && loc.includes(other)));
+    if (anchors.length === 0) anchors = ['__all__']; // no location data at all - treat as one shared zipper, as before
+
+    function belongsToAnchor(r, anchor){
+      if (anchor === '__all__') return true;
+      const loc = norm(r._location || '');
+      if (!loc) return true; // no location data on this row - can't rule it out
+      return loc.includes(anchor);
+    }
+
+    const mergedRows = [];
+    const consumed = new Set();
+    for (const anchor of anchors){
+      const group = zipperRows.filter(r => belongsToAnchor(r, anchor));
+      if (group.length <= 1) continue; // nothing to merge for this physical zipper
+
+      const partBuckets = [];
+      const byIdentity = new Map();
+      for (const g of group){
+        const key = partIdentity(g);
+        let bucket = byIdentity.get(key);
+        if (!bucket){ bucket = []; byIdentity.set(key, bucket); partBuckets.push(bucket); }
+        bucket.push(g);
+      }
+      const splitBuckets = partBuckets.filter(b => b.length > 1);
+      const sizeKeys = splitBuckets.length
+        ? [...new Set(splitBuckets.flatMap(b => b.map(it => normSize(it._sizeScale))))]
+        : [normSize(group[0]._sizeScale)];
+
+      for (const sizeKey of sizeKeys){
+        const chosen = partBuckets.map(bucket => pickForGroup(bucket, sizeKey)).filter(Boolean);
+        if (chosen.length === 0) continue;
+        mergedRows.push(buildMergedRow(chosen, sizeKey));
+      }
+      group.forEach(g => consumed.add(g));
+    }
+    if (mergedRows.length === 0) continue;
+
+    let firstIdx = null;
+    entries.forEach(({ r, idx }) => {
+      if (consumed.has(r)){
+        skip.add(idx);
+        if (firstIdx === null) firstIdx = idx;
+      }
+    });
+    if (firstIdx !== null) insertAt.set(firstIdx, mergedRows);
+  }
 
   const out = [];
-  let i = 0;
-  while (i < results.length){
-    const r = results[i];
-    const isZipperPart = ZIPPER_RE.test(r._type) || ZIPPER_RE.test(r._name) ||
-                          (PART_RE.test(r._type) && ZIPPER_RE.test(results.slice(Math.max(0,i-2), i+3).map(x=>x._name+' '+x._type).join(' ')));
-    if (isZipperPart){
-      const group = [r];
-      let j = i + 1;
-      const rLoc = norm(r._location || '');
-      while (j < results.length && results[j].section === r.section){
-        const jItem = results[j];
-        const jLoc = norm(jItem._location || '');
-        if (rLoc && jLoc){
-          // Both sides have real placement data - let it decide outright.
-          // Same placement -> definitely still this zipper, regardless of
-          // wording. Different placement -> definitely a different item,
-          // even if it happens to share a generic part keyword.
-          if (jLoc === rLoc){ group.push(jItem); j++; continue; }
-          break;
-        }
-        // Placement data missing on one or both sides - fall back to the
-        // previous keyword-based heuristic.
-        const directZipperMention = ZIPPER_RE.test(jItem._type) || ZIPPER_RE.test(jItem._name);
-        if (directZipperMention){ group.push(jItem); j++; continue; }
-        const looksLikePart = PART_RE.test(jItem._type) || PART_RE.test(jItem._name);
-        if (!looksLikePart) break;
-        const header = (jItem._columnHeader || '').trim();
-        if (header && !ZIPPER_RE.test(header)) break;
-        group.push(jItem);
-        j++;
-      }
-      if (group.length > 1){
-        const partBuckets = [];
-        const byIdentity = new Map();
-        for (const g of group){
-          const key = partIdentity(g);
-          let bucket = byIdentity.get(key);
-          if (!bucket){ bucket = []; byIdentity.set(key, bucket); partBuckets.push(bucket); }
-          bucket.push(g);
-        }
-
-        // Only a bucket that actually has more than one part can express a
-        // real size split; a lone shared part shouldn't manufacture an
-        // extra grouping just because its own Size scale happens to differ
-        // in wording from another bucket's.
-        const splitBuckets = partBuckets.filter(b => b.length > 1);
-        const groupKeys = splitBuckets.length
-          ? [...new Set(splitBuckets.flatMap(b => b.map(it => normSize(it._sizeScale))))]
-          : [normSize(r._sizeScale)];
-
-        for (const key of groupKeys){
-          const chosen = partBuckets.map(bucket => pickForGroup(bucket, key)).filter(Boolean);
-          if (chosen.length === 0) continue;
-          out.push({
-            section: r.section,
-            page: r.page,
-            itemName: chosen.map(g=>g.itemName).filter(Boolean).join(' + '),
-            internalCode: chosen.map(g=>g.internalCode).filter(Boolean).join(' + '),
-            supplier: chosen.map(g=>g.supplier).filter(Boolean).join(' + '),
-            unit: 'PCS',
-            extractedInfo: chosen.map(g=>g.extractedInfo).filter(Boolean).join(' + '),
-            _type: 'ZIPPER', _name: r._name,
-            _sizeScale: key,
-            _location: r._location,
-            _groupKey: '', // already a single combined item - not subject to group-key dedup
-            // The combined zipper is one physical unit - its consumption is
-            // driven by the first chosen part's own Quantity (normally the
-            // teeth, since that's what's present in virtually every group).
-            _quantity: chosen[0] ? chosen[0]._quantity : '',
-            // One physical slot has one printed heading (e.g. "CF ZIPPER"),
-            // even though its teeth/tape/puller parts sit in separate PDF
-            // columns that may each pick up their own fragment of header
-            // text. Prefer the group's first-encountered part's header
-            // (leftmost column, where the shared heading is most often
-            // printed); fall back to the first non-blank header found
-            // anywhere else in the group rather than concatenating every
-            // part's header together, which would read as a run-on mess.
-            _columnHeader: (r._columnHeader && r._columnHeader.trim())
-              || ((chosen.find(g => g._columnHeader && g._columnHeader.trim()) || {})._columnHeader || ''),
-          });
-        }
-        i = j;
-        continue;
-      }
-    }
-    out.push(r);
-    i++;
-  }
+  results.forEach((r, idx) => {
+    if (insertAt.has(idx)) out.push(...insertAt.get(idx));
+    if (!skip.has(idx)) out.push(r);
+  });
   return out;
 }
 
