@@ -336,7 +336,25 @@ function mergeZipperItems(results){
     const header = (g._columnHeader || '').trim();
     return norm(header || g._type || g._name || '');
   }
-  function buildMergedRow(chosen, sizeKey){
+  // A part shared between multiple physical zippers (e.g. one tape code
+  // used at both a CF zip and a chest pocket zip) has its own printed
+  // Quantity reflecting the TOTAL across every zipper it's used in (e.g.
+  // "2" = 1 each at 2 locations), not the amount used at any one of them.
+  // shareCountFn tells us how many physical zippers this particular row
+  // is shared across, so its contribution to THIS merged row's own
+  // consumption can be divided back down to a true per-zipper amount
+  // instead of overstating it by the shared total every time it appears.
+  function buildMergedRow(chosen, sizeKey, shareCountFn){
+    const rep = chosen[0];
+    const shareCount = (shareCountFn && rep) ? shareCountFn(rep) : 1;
+    let quantity = rep ? rep._quantity : '';
+    if (rep && shareCount > 1){
+      const m = String(rep._quantity || '').trim().match(/^(\d+(?:\.\d+)?)/);
+      if (m){
+        const n = parseFloat(m[1]) / shareCount;
+        quantity = Number.isInteger(n) ? String(n) : String(Math.round(n * 1000) / 1000);
+      }
+    }
     return {
       section: chosen[0].section,
       page: chosen[0].page,
@@ -351,8 +369,9 @@ function mergeZipperItems(results){
       _groupKey: '', // already a single combined item - not subject to group-key dedup
       // The combined zipper is one physical unit - its consumption is
       // driven by the first chosen part's own Quantity (normally the
-      // teeth, since that's what's present in virtually every group).
-      _quantity: chosen[0] ? chosen[0]._quantity : '',
+      // teeth, since that's what's present in virtually every group),
+      // adjusted for sharing across multiple physical zippers as above.
+      _quantity: quantity,
       // One physical slot has one printed heading (e.g. "CF ZIPPER"),
       // even though its teeth/tape/puller parts sit in separate PDF
       // columns that may each pick up their own fragment of header text.
@@ -366,9 +385,16 @@ function mergeZipperItems(results){
   }
 
   // Process one section's rows at a time - zipper grouping should never
-  // cross a section boundary (e.g. Trim vs Labels & packaging).
+  // cross a section boundary (e.g. Trim vs Labels & packaging). Fabric is
+  // skipped entirely: a fabric column's own heading often describes WHERE
+  // that piece of fabric is used (e.g. "CF ZIPPER GUARDS/CF ZIPPER
+  // BINDING"), which mentions "zipper" even though the fabric itself
+  // isn't a zipper component at all - without this exclusion, two
+  // unrelated fabric columns that both happen to be used near a zipper
+  // could get wrongly folded into one another.
   const bySection = new Map();
   results.forEach((r, idx) => {
+    if (r.section === 'Fabric') return;
     if (!bySection.has(r.section)) bySection.set(r.section, []);
     bySection.get(r.section).push({ r, idx });
   });
@@ -407,6 +433,14 @@ function mergeZipperItems(results){
       if (!loc) return true; // no location data on this row - can't rule it out
       return loc.includes(anchor);
     }
+    // How many of this section's distinct physical zippers a given row's
+    // own Location text covers - 1 for a zipper-specific part (teeth), 2+
+    // for a part shared across multiple zippers (tape, puller). Used to
+    // divide a shared part's combined-total Quantity back down to its
+    // true per-zipper amount (see buildMergedRow).
+    function shareCountFor(r){
+      return anchors.filter(a => belongsToAnchor(r, a)).length || 1;
+    }
 
     const mergedRows = [];
     const consumed = new Set();
@@ -430,7 +464,7 @@ function mergeZipperItems(results){
       for (const sizeKey of sizeKeys){
         const chosen = partBuckets.map(bucket => pickForGroup(bucket, sizeKey)).filter(Boolean);
         if (chosen.length === 0) continue;
-        mergedRows.push(buildMergedRow(chosen, sizeKey));
+        mergedRows.push(buildMergedRow(chosen, sizeKey, shareCountFor));
       }
       group.forEach(g => consumed.add(g));
     }
