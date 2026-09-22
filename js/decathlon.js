@@ -303,30 +303,31 @@ function isDecathlonZipperPart(row) {
   return false;
 }
 
-// Seam tape and glue are fabric-adjacent consumables that tech packs
-// sometimes file under Accessories (or, less often, Legal Marking/Label) -
-// per business rule they always belong in the Fabrics section for costing,
-// regardless of which section heading they were actually extracted under.
-// Checked against both Part and Component text, same pattern as the
-// zipper-detection above.
-function isDecathlonSeamTapeOrGlue(row) {
+// Seam tape, decorative tape, and glue are fabric-adjacent consumables
+// that tech packs sometimes file under Accessories (or, less often, Legal
+// Marking/Label) - per business rule they always belong in the Fabrics
+// section for costing, regardless of which section heading they were
+// actually extracted under. Checked against both Part and Component text,
+// same pattern as the zipper-detection above.
+function isDecathlonFabricRedirectItem(row) {
   const text = `${row.part || ''} ${row.component || ''}`;
-  return /seam\s*tape/i.test(text) || /\bglue\b/i.test(text);
+  return /seam\s*tape/i.test(text) || /decorative\s*tape/i.test(text) || /\bglue\b/i.test(text);
 }
 
-// Moves every seam-tape/glue row found in any non-Fabrics section into
-// Fabrics, in place. Run before section-specific dedupe rules are applied
-// so a redirected row is deduped using Fabrics' own DSM+ItemCode rule, not
-// its original section's rule - it is being treated as a full Fabrics item
-// from this point on, not just physically relocated.
+// Moves every seam tape/decorative tape/glue row found in any non-Fabrics
+// section into Fabrics, in place. Run before section-specific dedupe rules
+// are applied so a redirected row is deduped using Fabrics' own
+// DSM+ItemCode rule, not its original section's rule - it is being
+// treated as a full Fabrics item from this point on, not just physically
+// relocated.
 //
 // NOTE (visible consequence, flagged rather than silently decided): once
-// redirected, a seam tape/glue row picks up every other Fabrics-only rule
-// too - Consumption is left blank, Unit is forced to "yd" regardless of the
+// redirected, a row picks up every other Fabrics-only rule too -
+// Consumption is left blank, Unit is forced to "yd" regardless of the
 // tech pack's own unit for that row, and it gets NO Component
 // supplier/Unit price/Api marker from the price list (Fabrics rows are
-// exempt from price-list lookups, same as any other Fabrics item). If
-// seam tape/glue should keep its own unit or still be priced from the
+// exempt from price-list lookups, same as any other Fabrics item). If any
+// of these three should keep its own unit or still be priced from the
 // list, say so and this can be scoped down to "section placement only".
 function redirectDecathlonFabricLikeItems(sections) {
   sections.Fabrics = sections.Fabrics || [];
@@ -335,14 +336,40 @@ function redirectDecathlonFabricLikeItems(sections) {
     const rows = sections[name] || [];
     const keep = [];
     for (const r of rows) {
-      if (isDecathlonSeamTapeOrGlue(r)) sections.Fabrics.push(r);
+      if (isDecathlonFabricRedirectItem(r)) sections.Fabrics.push(r);
       else keep.push(r);
     }
     sections[name] = keep;
   }
 }
 
-// Full-row signature for the "same DSM code" dedupe rule: two rows only
+// Fabrics: a row is a duplicate only if BOTH its DSM code and Item Code
+// match a row already kept. Per business rule, a duplicate is NOT simply
+// dropped - its Part (Type) text is merged into the surviving row's Part
+// with " + " instead, e.g. two rows sharing one DSM+Item Code slot but
+// different Part text end up as one row whose Type reads "PART A + PART
+// B", rather than silently keeping "PART A" and losing "PART B" entirely.
+// Identical Part text isn't duplicated in the merged text. Every other
+// field keeps the first occurrence's own value, unchanged (same "take one
+// of them" behavior as before for everything except Part).
+function mergeDecathlonFabricDuplicates(rows) {
+  const order = [];
+  const byKey = new Map();
+  for (const r of rows) {
+    const key = (r.dsm || '') + '\u0001' + (r.itemCode || '');
+    if (byKey.has(key)) {
+      const entry = byKey.get(key);
+      if (r.part && !entry.parts.includes(r.part)) entry.parts.push(r.part);
+    } else {
+      byKey.set(key, { row: r, parts: r.part ? [r.part] : [] });
+      order.push(key);
+    }
+  }
+  return order.map(key => {
+    const { row, parts } = byKey.get(key);
+    return parts.length > 1 ? { ...row, part: parts.join(' + ') } : row;
+  });
+}
 // count as duplicates if EVERY field matches, not just DSM+Part.
 function decathlonRowSignature(r) {
   return [r.part, r.dsm, r.model, r.component, r.itemCode, r.gridValue, r.items, r.qty, r.unit, r.comments]
@@ -360,9 +387,37 @@ function isDecathlonGhostRow(r) {
   return [r.part, r.dsm, r.itemCode, r.component, r.gridValue].every(v => !v || !v.toString().trim());
 }
 
+// Accessories-only, additional pass layered ON TOP of the rules above (run
+// after them, on whatever survives): among rows sharing Part (Type), DSM
+// code, AND Item Code, collapse them to one ONLY if their Comments text
+// also matches - and only when that Comments text is non-empty. Rows that
+// share Part+DSM+ItemCode but have different Comments, or have no Comments
+// at all (either side), are kept as separate rows rather than assumed to
+// be duplicates - an empty Comments field carries no information that
+// would confirm two rows are really the same physical item.
+function decathlonAccessoryCommentsDedupeKey(r) {
+  const comments = (r.comments || '').toString().trim().toLowerCase();
+  if (!comments) return null; // empty comments -> never treated as a match, even against another empty one
+  return [r.part, r.dsm, r.itemCode].map(v => (v || '').toString().trim().toLowerCase()).join('\u0001') + '\u0001' + comments;
+}
+function collapseDecathlonAccessoriesByComments(rows) {
+  const seen = new Set();
+  const out = [];
+  for (const r of rows) {
+    const key = decathlonAccessoryCommentsDedupeKey(r);
+    if (key === null) { out.push(r); continue; }
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(r);
+  }
+  return out;
+}
+
 // Dedupe rules (per business logic):
 //  - Fabrics: a row is a duplicate only if BOTH its DSM code and its Item
-//    Code match a row already kept — keep the first occurrence, drop the rest.
+//    Code match a row already kept — kept once, with its Part (Type) text
+//    merged into the survivor's Part via " + " rather than discarded (see
+//    mergeDecathlonFabricDuplicates).
 //  - Zippers (Accessories rows identified by isDecathlonZipperPart — Part
 //    starting with "Z", the word "zip"/"zipper" in Part, or a recognized
 //    zip-component supplier code) and the whole Sales Packaging section: a
@@ -372,10 +427,13 @@ function isDecathlonGhostRow(r) {
 //    Accessories rows): when the DSM code matches a row already kept, the
 //    two rows are only treated as duplicates if EVERY other field also
 //    matches exactly. If anything else differs, both rows are kept.
+//  - Accessories only, additionally: after the rule above, rows sharing
+//    Part+DSM+ItemCode collapse to one if their (non-empty) Comments also
+//    match — see collapseDecathlonAccessoriesByComments.
 //  - Thread items (Part containing "thread", e.g. "Thread Tape" or
 //    "Thread // Needle") are collapsed to a single representative row
 //    regardless of DSM/Part — which one survives doesn't matter. This takes
-//    priority over both rules above.
+//    priority over every rule above.
 function dedupeDecathlonSections(sections) {
   // Seam tape / glue always belongs in Fabrics - reassign before anything
   // else so it's deduped and priced as a Fabrics item from here on.
@@ -388,13 +446,7 @@ function dedupeDecathlonSections(sections) {
   // business rule.
   sections['Sales Packaging'] = (sections['Sales Packaging'] || []).filter(r => !/\bbox\b/i.test(r.part || ''));
 
-  const seenFab = new Set();
-  sections.Fabrics = (sections.Fabrics || []).filter(r => {
-    const key = (r.dsm || '') + '\u0001' + (r.itemCode || '');
-    if (seenFab.has(key)) return false;
-    seenFab.add(key);
-    return true;
-  });
+  sections.Fabrics = mergeDecathlonFabricDuplicates(sections.Fabrics || []);
 
   const OTHER_SECTIONS = ['Legal Marking', 'Label', 'Graphic', 'Accessories', 'Sales Packaging'];
   for (const name of OTHER_SECTIONS) {
@@ -423,7 +475,7 @@ function dedupeDecathlonSections(sections) {
         kept.push(r);
       }
     }
-    sections[name] = kept;
+    sections[name] = (name === 'Accessories') ? collapseDecathlonAccessoriesByComments(kept) : kept;
   }
   return sections;
 }
@@ -524,7 +576,7 @@ function fillSectionDecathlon(ws, cfg, items, maxSheetRow) {
   }
 
   const UNIT_COL = 13; // column M — Per unit
-  const INPUT_COLS = [1, 2, 6, 7, 8, 9, 10, 12, 13, 14, 17, 18, 22]; // A,B,F,G,H,I,J,L,M,N,Q,R,V
+  const INPUT_COLS = [1, 2, 4, 6, 7, 8, 9, 10, 12, 13, 14, 17, 18, 22]; // A,B,D,F,G,H,I,J,L,M,N,Q,R,V
   items.forEach((item, i) => {
     const r = first + i;
     // Clear the whole row's input columns first so no stale template sample
@@ -680,14 +732,17 @@ function parseDecathlonPrice(raw) {
   return negative ? -n : n;
 }
 
-// Builds a DSM+ItemCode -> [{origin, currency, price, rawPrice, supplier}]
-// index from the raw rows of the uploaded price list. Rows missing DSM or
-// Item Code are skipped (there's no way to key them at all); a row with an
-// unparseable price is intentionally KEPT (with price left as NaN, and the
-// original text preserved in rawPrice) rather than silently dropped -
-// decathlonLookupPrice checks for exactly this, so a higher-priority
-// region with a real but unparseable price is flagged instead of the
-// lookup just proceeding as if that region had no entry at all.
+// Builds a DSM -> [{itemCode, origin, currency, price, rawPrice, supplier}]
+// index from the raw rows of the uploaded price list - keyed by DSM alone
+// (not DSM+ItemCode), so decathlonLookupPrice can see every Item Code filed
+// under a DSM, not just the one it was asked to match. Rows missing DSM or
+// Item Code are skipped (there's no way to attribute them at all); a row
+// with an unparseable price is intentionally KEPT (with price left as NaN,
+// and the original text preserved in rawPrice) rather than silently
+// dropped - decathlonLookupPrice checks for exactly this, so a
+// higher-priority region with a real but unparseable price is flagged
+// instead of the lookup just proceeding as if that region had no entry at
+// all.
 function buildDecathlonPriceIndex(rawRows) {
   const idx = new Map();
   for (const row of rawRows) {
@@ -695,16 +750,16 @@ function buildDecathlonPriceIndex(rawRows) {
     const itemCode = squashDecathlonCode(row.itemCode);
     if (!dsm || !itemCode) continue;
     const price = parseDecathlonPrice(row.price);
-    const key = dsm + '\u0001' + itemCode;
     const entry = {
+      itemCode,
       origin: decathlonNormalizeOrigin(row.origin),
       currency: decathlonNormalizeCurrency(row.currency),
       price,
       rawPrice: (row.price === null || row.price === undefined) ? '' : row.price.toString().trim(),
       supplier: (row.supplier || '').toString().trim(),
     };
-    if (!idx.has(key)) idx.set(key, []);
-    idx.get(key).push(entry);
+    if (!idx.has(dsm)) idx.set(dsm, []);
+    idx.get(dsm).push(entry);
   }
   return idx;
 }
@@ -712,21 +767,35 @@ function buildDecathlonPriceIndex(rawRows) {
 const DECATHLON_CNY_TO_USD = 0.15;
 const DECATHLON_REGION_PRIORITY = ['bangladesh', 'china', 'vietnam'];
 
-// Looks up a DSM+ItemCode pair in the price index, walking regions in
-// priority order (Bangladesh -> China -> Vietnam) and, within each region,
-// preferring a USD-priced row over a CNY-priced one (converted at 0.15).
-// Returns { price, supplier, region } or null if no match anywhere.
+// Looks up a price for a DSM+ItemCode pair, walking regions in priority
+// order (Bangladesh -> China -> Vietnam). Within each region:
+//  1. Prefer an entry whose Item Code exactly matches (a USD-declared one
+//     over a CNY-declared one, converted at 0.15, if both exist for that
+//     same Item Code) - the original DSM+ItemCode match, unchanged.
+//  2. If no Item Code in this region matches, fall back to every priced
+//     entry filed under this DSM in this region regardless of Item Code:
+//     if they're all the same (USD-equivalent) price, that price is safe
+//     to use as-is; if they genuinely differ, the highest one is used and
+//     flagged via highestPriceTaken (written to the Model code column by
+//     computeDecathlonPricing) rather than silently guessing which one is
+//     "right".
+// A region is only skipped in favor of a lower-priority one when it has NO
+// entries for this DSM at all - never because of an Item Code mismatch,
+// and never because of an unusable currency/price (those get flagged
+// instead - see unmatchedRegion below).
+// Returns { price, supplier, region, highestPriceTaken? } or null.
 function decathlonLookupPrice(priceIndex, dsm, itemCode) {
   if (!priceIndex) return null;
   // Squash internal whitespace here too (not just at extraction time) so a
   // stray space anywhere in either the extracted row or the uploaded price
   // list itself can never by itself cause an otherwise-real match to be
   // missed.
-  const key = squashDecathlonCode(dsm) + '\u0001' + squashDecathlonCode(itemCode);
-  const entries = priceIndex.get(key);
+  const dsmKey = squashDecathlonCode(dsm);
+  const targetItemCode = squashDecathlonCode(itemCode);
+  const entries = priceIndex.get(dsmKey);
   if (!entries || !entries.length) return null;
 
-  // If the price list has ANY entry for this item under an Origin that
+  // If the price list has ANY entry for this DSM under an Origin that
   // doesn't normalize to one of the 3 known regions, it can't safely be
   // ranked against the regions that DO match below - it might be a variant
   // spelling of a higher-priority region (e.g. "BD - Chittagong" instead
@@ -742,22 +811,52 @@ function decathlonLookupPrice(priceIndex, dsm, itemCode) {
   for (const region of DECATHLON_REGION_PRIORITY) {
     const regionEntries = entries.filter(e => e.origin === region);
     if (!regionEntries.length) continue;
-    const usd = regionEntries.find(e => e.currency === 'usd' && !isNaN(e.price));
-    if (usd) return { price: usd.price, supplier: usd.supplier, region };
-    const cny = regionEntries.find(e => e.currency === 'cny' && !isNaN(e.price));
-    if (cny) return { price: Math.round(cny.price * DECATHLON_CNY_TO_USD * 1e6) / 1e6, supplier: cny.supplier, region };
-    // This region DOES have a price-list entry for this DSM+Item Code, so
-    // it must never be silently skipped in favor of a lower-priority
-    // region. Two distinct ways that can happen: the currency isn't one we
-    // convert (handled below), or the currency IS recognized but the price
-    // itself didn't parse to a real number (e.g. "$10.00", "1,234.56" -
-    // see parseDecathlonPrice) - both get their own explicit flag rather
-    // than silently falling through.
-    const recognizedCurrencyEntry = regionEntries.find(e => e.currency === 'usd' || e.currency === 'cny');
-    if (recognizedCurrencyEntry) {
-      return { unmatchedRegion: region, invalidPrice: true, rawPrice: recognizedCurrencyEntry.rawPrice };
+
+    // Normalize every entry in this region to a USD-equivalent price (CNY
+    // converted at 0.15, rounded the same way as before). An entry whose
+    // currency isn't USD/CNY, or whose price didn't parse, has no usable
+    // USD-equivalent and is excluded from usable below.
+    const withUsd = regionEntries.map(e => {
+      let usdPrice = NaN;
+      if (!isNaN(e.price)) {
+        if (e.currency === 'usd') usdPrice = e.price;
+        else if (e.currency === 'cny') usdPrice = Math.round(e.price * DECATHLON_CNY_TO_USD * 1e6) / 1e6;
+      }
+      return { ...e, usdPrice };
+    });
+    const usable = withUsd.filter(e => !isNaN(e.usdPrice));
+
+    if (!usable.length) {
+      // This region has entries for this DSM, but not a single one has a
+      // usable price - must never be silently skipped in favor of a
+      // lower-priority region. Two distinct ways this happens: the
+      // currency isn't one we convert, or the currency IS recognized but
+      // the price itself didn't parse (e.g. "$10.00", "1,234.56" - see
+      // parseDecathlonPrice) - each gets its own explicit flag.
+      const recognizedCurrencyEntry = regionEntries.find(e => e.currency === 'usd' || e.currency === 'cny');
+      if (recognizedCurrencyEntry) {
+        return { unmatchedRegion: region, invalidPrice: true, rawPrice: recognizedCurrencyEntry.rawPrice };
+      }
+      return { unmatchedRegion: region, rawCurrency: regionEntries[0].currency };
     }
-    return { unmatchedRegion: region, rawCurrency: regionEntries[0].currency };
+
+    // Step 1: exact Item Code match, USD-declared preferred over
+    // CNY-declared when both exist for that same Item Code.
+    const itemMatches = usable.filter(e => e.itemCode === targetItemCode);
+    if (itemMatches.length) {
+      const chosen = itemMatches.find(e => e.currency === 'usd') || itemMatches[0];
+      return { price: chosen.usdPrice, supplier: chosen.supplier, region };
+    }
+
+    // Step 2: Item Code didn't match anything in this region - fall back
+    // to every usable price filed under this DSM in this region,
+    // regardless of Item Code.
+    const distinctPrices = [...new Set(usable.map(e => e.usdPrice))];
+    if (distinctPrices.length === 1) {
+      return { price: usable[0].usdPrice, supplier: usable[0].supplier, region };
+    }
+    const highest = usable.reduce((a, b) => (b.usdPrice > a.usdPrice ? b : a));
+    return { price: highest.usdPrice, supplier: highest.supplier, region, highestPriceTaken: true };
   }
   return null;
 }
@@ -771,12 +870,16 @@ const DECATHLON_DEFAULT_FONT = { color: { argb: 'FF000000' } };
 //  1. Fabrics (except Interlining) -> untouched.
 //  2. Flat-rate categories (rule 10) -> always win, no price-file lookup.
 //  3. No DSM code -> "DSM is missing" in red, no price.
-//  4. DSM+Item Code price-file lookup, Bangladesh -> China -> Vietnam,
-//     USD preferred over CNY (converted). No match anywhere -> "Price not
-//     found" in red. A higher-priority region's entry is NEVER silently
-//     skipped in favor of a lower-priority one: if it exists but its
-//     currency or origin text isn't recognized, that's reported explicitly
-//     in red instead (see decathlonLookupPrice).
+//  4. Price-file lookup, Bangladesh -> China -> Vietnam. Within a region:
+//     an exact DSM+Item Code match wins outright; failing that, every
+//     price filed under that DSM in that region is compared - identical
+//     prices are used as-is, differing prices use the highest one and flag
+//     "Highest price taken" in the Model code column (see
+//     decathlonLookupPrice). No match anywhere -> "Price not found" in
+//     red. A higher-priority region's entry is NEVER silently skipped in
+//     favor of a lower-priority one: if it exists but its currency or
+//     origin text isn't recognized, that's reported explicitly in red
+//     instead.
 //  5. A match sourced from China or Vietnam gets an Api marker formula
 //     (Total Local price * 15%); Bangladesh does not.
 function computeDecathlonPricing(r, sectionName, priceIndex) {
@@ -786,31 +889,32 @@ function computeDecathlonPricing(r, sectionName, priceIndex) {
 
   const flat = decathlonFlatRateFor(r);
   if (flat) {
-    return { supplierText: flat.supplier, isError: false, unitPrice: flat.price, needsApiMarker: false };
+    return { supplierText: flat.supplier, isError: false, unitPrice: flat.price, needsApiMarker: false, highestPriceTaken: false };
   }
 
   if (!r.dsm) {
-    return { supplierText: 'DSM is missing', isError: true, unitPrice: null, needsApiMarker: false };
+    return { supplierText: 'DSM is missing', isError: true, unitPrice: null, needsApiMarker: false, highestPriceTaken: false };
   }
 
   const found = decathlonLookupPrice(priceIndex, r.dsm, r.itemCode);
   if (!found) {
-    return { supplierText: 'Price not found', isError: true, unitPrice: null, needsApiMarker: false };
+    return { supplierText: 'Price not found', isError: true, unitPrice: null, needsApiMarker: false, highestPriceTaken: false };
   }
   if (found.unmatchedRegion) {
     const msg = found.invalidPrice
       ? `${found.unmatchedRegion} price found, not a valid number ("${found.rawPrice}")`
       : `${found.unmatchedRegion} price found, unrecognized currency "${found.rawCurrency}"`;
-    return { supplierText: msg, isError: true, unitPrice: null, needsApiMarker: false };
+    return { supplierText: msg, isError: true, unitPrice: null, needsApiMarker: false, highestPriceTaken: false };
   }
   if (found.unrecognizedOrigin) {
-    return { supplierText: `Price found, unrecognized origin "${found.unrecognizedOrigin}"`, isError: true, unitPrice: null, needsApiMarker: false };
+    return { supplierText: `Price found, unrecognized origin "${found.unrecognizedOrigin}"`, isError: true, unitPrice: null, needsApiMarker: false, highestPriceTaken: false };
   }
   return {
     supplierText: found.supplier,
     isError: false,
     unitPrice: found.price,
     needsApiMarker: found.region !== 'bangladesh',
+    highestPriceTaken: !!found.highestPriceTaken,
   };
 }
 
@@ -923,6 +1027,16 @@ function fillDecathlonWorksheet(ws, extracted, r3List, priceIndex) {
       compute: (it, r) => (it.dsmLen === 7) ? { formula: `LEFT(B${r},7)` } : null,
     },
     { col: 12, compute: it => it.qty }, // null/undefined -> cell left untouched
+    {
+      // D — Model code column; normally left blank. Repurposed to flag the
+      // "same DSM, Item Code didn't match anything, prices under that DSM
+      // genuinely differed -> highest one used" fallback (see
+      // decathlonLookupPrice / computeDecathlonPricing), so it's visible
+      // right next to the price it applies to rather than hidden in a
+      // supplier-text comment.
+      col: 4,
+      compute: it => (it.pricing && it.pricing.highestPriceTaken) ? 'Highest price taken' : null,
+    },
     {
       col: 6, // Component supplier — supplier name, or a "DSM is missing" /
                // "Price not found" comment in red when pricing failed.
@@ -1065,9 +1179,20 @@ async function buildMultiCCCostBreakDown(templateArrayBuffer, ccSessions, priceI
   }
 
   const usedNames = new Set();
+  // Excel sheet names: <=31 chars, none of \ / ? * [ ] :, can't start/end
+  // with a single quote. CC numbers are normally clean digits, but this is
+  // the same defensive sanitizer the other buyer engines in this file use
+  // - without it, an unusual CC number (stray punctuation, or one long
+  // enough that appending " V2" pushes it past 31 chars) would throw when
+  // the worksheet is actually named, aborting the whole generation.
+  function sanitizeDecathlonSheetName(name) {
+    let n = (name || 'Sheet').replace(/[\\/?*\[\]:]/g, '-').replace(/^'+|'+$/g, '').trim();
+    if (n.length > 31) n = n.slice(0, 31).trim();
+    return n || 'Sheet';
+  }
   function uniqueName(base) {
-    let name = base, n = 1;
-    while (usedNames.has(name)) { name = `${base} (${++n})`; }
+    let name = sanitizeDecathlonSheetName(base), n = 1;
+    while (usedNames.has(name)) { name = sanitizeDecathlonSheetName(`${base} (${++n})`); }
     usedNames.add(name);
     return name;
   }
