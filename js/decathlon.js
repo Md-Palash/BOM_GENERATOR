@@ -882,10 +882,16 @@ const DECATHLON_DEFAULT_FONT = { color: { argb: 'FF000000' } };
 //     instead.
 //  5. A match sourced from China or Vietnam gets an Api marker formula
 //     (Total Local price * 15%); Bangladesh does not.
-function computeDecathlonPricing(r, sectionName, priceIndex) {
+function computeDecathlonPricing(r, sectionName, priceIndex, fabricPriceIndex) {
   const isFabric = sectionName === 'Fabrics';
   const isInterlining = decathlonIsInterlining(r);
-  if (isFabric && !isInterlining) return null;
+  // Fabrics (except Interlining, which keeps its flat rate below) are priced
+  // from the separate fabric price list. With no fabric list loaded this is
+  // exactly the old behaviour: cells left untouched.
+  if (isFabric && !isInterlining) {
+    if (!fabricPriceIndex) return null;
+    return computeDecathlonFabricPricing(r, fabricPriceIndex);
+  }
 
   const flat = decathlonFlatRateFor(r);
   if (flat) {
@@ -962,11 +968,127 @@ async function parseDecathlonPriceFile(file) {
 }
 
 
+/* ============================================================
+   FABRIC PRICING ENGINE (separate fabric price file)
+   Fabric prices come from their own price list, never mixed with the
+   accessories list above. Columns are matched by header text:
+   DSM Code | Item Code | Supplier | Usable Width | Price | True/False | Region
+   ============================================================ */
+function decathlonNormHeader(s) {
+  return (s || '').toString().toLowerCase().replace(/\s+/g, ' ').trim();
+}
+function decathlonIsTrue(v) {
+  if (v === true) return true;
+  if (v === null || v === undefined) return false;
+  return /^true$/i.test(v.toString().trim());
+}
+
+async function parseDecathlonFabricPriceFile(file) {
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(buf, { type: 'array' });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  // Two parallel reads of the same sheet (row/column aligned):
+  //  - text (raw:false): DSM/Item codes, supplier, width, region - kept as
+  //    displayed so ID-like codes are never numerically reinterpreted.
+  //  - raw (raw:true): Price and True/False - Price keeps its full stored
+  //    precision (e.g. 3.849734513) instead of whatever the cell's display
+  //    format happens to round it to; True/False arrives as a real boolean.
+  const aoaText = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
+  const aoaRaw = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
+  if (!aoaText.length) return [];
+  const header = aoaText[0].map(decathlonNormHeader);
+  const idxOf = name => header.indexOf(name);
+  const c = {
+    dsm: idxOf('dsm code'),
+    itemCode: idxOf('item code'),
+    supplier: idxOf('supplier'),
+    width: idxOf('usable width'),
+    price: idxOf('price'),
+    flag: idxOf('true/false'),
+    region: idxOf('region'),
+  };
+  const missing = Object.entries(c).filter(([, i]) => i === -1).map(([k]) => k);
+  if (missing.length) throw new Error(`Fabric price list is missing expected column(s): ${missing.join(', ')}`);
+
+  const rows = [];
+  for (let i = 1; i < aoaText.length; i++) {
+    const t = aoaText[i], r = aoaRaw[i] || [];
+    if (!t || !t.length) continue;
+    const dsm = squashDecathlonCode(t[c.dsm]);
+    if (!dsm) continue;
+    const rawPriceVal = r[c.price];
+    const priceText = (t[c.price] === null || t[c.price] === undefined) ? '' : t[c.price].toString().trim();
+    const price = (typeof rawPriceVal === 'number') ? rawPriceVal : parseDecathlonPrice(priceText);
+    rows.push({
+      dsm,
+      itemCode: squashDecathlonCode(t[c.itemCode]),
+      supplier: (t[c.supplier] || '').toString().trim(),
+      width: (t[c.width] || '').toString().trim(),
+      price,
+      rawPrice: priceText,
+      isTrue: decathlonIsTrue(r[c.flag]) || decathlonIsTrue(t[c.flag]),
+      region: (t[c.region] || '').toString().trim(),
+    });
+  }
+  return rows;
+}
+
+function buildDecathlonFabricPriceIndex(rows) {
+  const idx = new Map();
+  for (const e of rows) {
+    if (!idx.has(e.dsm)) idx.set(e.dsm, []);
+    idx.get(e.dsm).push(e);
+  }
+  return idx;
+}
+
+// DSM -> keep only True rows -> if exactly one, use it (Item Code not
+// checked); if several, the extracted Item Code must match. Anything that
+// can't be resolved cleanly returns { error } so it's flagged in red in the
+// sheet instead of silently guessing.
+function decathlonLookupFabricPrice(idx, dsm, itemCode) {
+  const entries = idx.get(squashDecathlonCode(dsm));
+  if (!entries || !entries.length) return { error: 'Fabric price not found (DSM not in fabric price list)' };
+  const trues = entries.filter(e => e.isTrue);
+  if (!trues.length) return { error: 'Fabric price not found (no TRUE row for this DSM)' };
+
+  let pool = trues;
+  if (trues.length > 1) {
+    const code = squashDecathlonCode(itemCode);
+    pool = code ? trues.filter(e => e.itemCode === code) : [];
+    if (!pool.length) {
+      return { error: `Fabric price not found (${trues.length} TRUE rows for this DSM, Item code ${code ? '"' + code + '" ' : 'missing / '}not matched)` };
+    }
+    if (pool.length > 1 && new Set(pool.map(e => e.price)).size > 1) {
+      return { error: `Fabric price ambiguous (${pool.length} TRUE rows with different prices for DSM + Item code "${code}")` };
+    }
+  }
+  const chosen = pool[0];
+  if (isNaN(chosen.price)) {
+    return { error: chosen.rawPrice ? `Fabric price found, not a valid number ("${chosen.rawPrice}")` : 'Fabric price found, but Price cell is blank' };
+  }
+  return { entry: chosen };
+}
+
+function computeDecathlonFabricPricing(r, fabricPriceIndex) {
+  const fail = msg => ({ supplierText: msg, isError: true, unitPrice: null, needsApiMarker: false, highestPriceTaken: false });
+  if (!r.dsm) return fail('DSM is missing');
+  const res = decathlonLookupFabricPrice(fabricPriceIndex, r.dsm, r.itemCode);
+  if (res.error) return fail(res.error);
+  const e = res.entry;
+  return {
+    supplierText: e.supplier, isError: false, unitPrice: e.price,
+    needsApiMarker: false, highestPriceTaken: false,
+    usableWidth: e.width,          // -> column G (Usable Width)
+    apiMarkerText: e.region,       // -> column V (Api marker): region text, no % uplift for fabrics
+  };
+}
+
 // r3List is the full set of R3 numbers that share this exact BOM (see
 // buildMultiCCCostBreakDown) — when there's more than one, they all go into
 // the R3 cell together, comma-separated, instead of getting separate tabs.
 // Returns per-section item counts.
-function fillDecathlonWorksheet(ws, extracted, r3List, priceIndex) {
+function fillDecathlonWorksheet(ws, extracted, r3List, priceIndex, fabricPriceIndex) {
   const { productName, ccNumber, r3, sections } = extracted;
   const originalRowCount = ws.rowCount;
   let maxRow = originalRowCount;
@@ -1006,7 +1128,7 @@ function fillDecathlonWorksheet(ws, extracted, r3List, priceIndex) {
       qty: isFabric ? null : decathlonConsumptionValue(r),
       // null for non-Interlining Fabrics rows -> supplier/price/Api marker
       // extraCols below all no-op for those, leaving the cells untouched.
-      pricing: computeDecathlonPricing(r, sectionName, priceIndex),
+      pricing: computeDecathlonPricing(r, sectionName, priceIndex, fabricPriceIndex),
       // Length of the row's own (already-squashed) DSM code - drives the
       // column C DSM-code formula override below.
       dsmLen: squashDecathlonCode(r.dsm).length,
@@ -1044,12 +1166,23 @@ function fillDecathlonWorksheet(ws, extracted, r3List, priceIndex) {
       styleCompute: it => (it.pricing ? (it.pricing.isError ? DECATHLON_RED_FONT : DECATHLON_DEFAULT_FONT) : null),
     },
     {
+      col: 7, // Usable Width (G) — fabric price list only; text as given, e.g. "147±2cm".
+      compute: it => (it.pricing && it.pricing.usableWidth) ? it.pricing.usableWidth : null,
+    },
+    {
       col: 9, // Unit price — always a real number, never text.
       compute: it => (it.pricing && it.pricing.unitPrice !== null && it.pricing.unitPrice !== undefined) ? it.pricing.unitPrice : null,
     },
     {
       col: 22, // Api marker — formula, only for China/Vietnam-sourced prices.
-      compute: (it, r) => (it.pricing && it.pricing.needsApiMarker) ? { formula: `S${r}*0.15` } : null,
+      compute: (it, r) => {
+        if (!it.pricing) return null;
+        if (it.pricing.needsApiMarker) return { formula: `S${r}*0.15` };
+        // Fabric rows: region text only (no formula). Local Transport's
+        // SUM(V...) ignores text, so this never affects any total.
+        if (it.pricing.apiMarkerText) return it.pricing.apiMarkerText;
+        return null;
+      },
     },
   ];
 
@@ -1162,7 +1295,7 @@ function cloneWorksheetInto(targetWorkbook, sourceWs, newName) {
 //    that same CC is treated as a duplicate BOM and is not written anywhere
 //  - ccSessions: [{ ccNumber, r3DataList: [...] }, ...] — one entry per
 //    uploaded tech pack
-async function buildMultiCCCostBreakDown(templateArrayBuffer, ccSessions, priceIndex) {
+async function buildMultiCCCostBreakDown(templateArrayBuffer, ccSessions, priceIndex, fabricPriceIndex) {
   const mainWorkbook = new ExcelJS.Workbook();
   await mainWorkbook.xlsx.load(templateArrayBuffer.slice(0));
   let reusableWs = mainWorkbook.getWorksheet('Format'); // consumed once, for the very first tab overall
@@ -1225,7 +1358,7 @@ async function buildMultiCCCostBreakDown(templateArrayBuffer, ccSessions, priceI
       const primaryData = group.entries[0].data;
 
       const { ws, isNew } = await getFreshWorksheet();
-      const counts = fillDecathlonWorksheet(ws, primaryData, r3List, priceIndex);
+      const counts = fillDecathlonWorksheet(ws, primaryData, r3List, priceIndex, fabricPriceIndex);
       if (isNew) {
         cloneWorksheetInto(mainWorkbook, ws, sheetName);
       } else {
@@ -1305,9 +1438,13 @@ let currentDecResults = null;   // array of extracted+deduped R3 data for the te
 let ccSessions = [];            // banked sessions: [{ ccNumber, r3DataList }, ...]
 let decathlonPriceIndex = null; // DSM+ItemCode -> price entries, built once per session from the uploaded price list
 let decathlonPriceRowCount = 0;
+let decathlonFabricPriceIndex = null; // DSM -> fabric price rows, built from the separate fabric price list
+let decathlonFabricPriceRowCount = 0;
 
 const priceFileInputDec = document.getElementById('priceFileInputDec');
 const priceStatusDec = document.getElementById('priceStatusDec');
+const fabricPriceFileInputDec = document.getElementById('fabricPriceFileInputDec');
+const fabricPriceStatusDec = document.getElementById('fabricPriceStatusDec');
 
 function parseR3List(raw) {
   return [...new Set((raw || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean))];
@@ -1377,7 +1514,7 @@ if (priceFileInputDec) {
       const rawRows = await parseDecathlonPriceFile(file);
       decathlonPriceIndex = buildDecathlonPriceIndex(rawRows);
       decathlonPriceRowCount = rawRows.length;
-      priceStatusDec.textContent = `Price list loaded — ${decathlonPriceRowCount.toLocaleString()} rows indexed (${file.name})`;
+      priceStatusDec.textContent = `Accessories price list loaded — ${decathlonPriceRowCount.toLocaleString()} rows indexed (${file.name})`;
       priceStatusDec.className = 'status ok';
     } catch (err) {
       console.error(err);
@@ -1385,6 +1522,29 @@ if (priceFileInputDec) {
       decathlonPriceRowCount = 0;
       priceStatusDec.textContent = 'Could not read price list: ' + err.message;
       priceStatusDec.className = 'status err';
+    }
+  });
+}
+
+if (fabricPriceFileInputDec) {
+  fabricPriceFileInputDec.addEventListener('change', async e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    fabricPriceStatusDec.textContent = 'Parsing fabric price list…';
+    fabricPriceStatusDec.className = 'status';
+    try {
+      const rows = await parseDecathlonFabricPriceFile(file);
+      decathlonFabricPriceIndex = buildDecathlonFabricPriceIndex(rows);
+      decathlonFabricPriceRowCount = rows.length;
+      const trueCount = rows.filter(r => r.isTrue).length;
+      fabricPriceStatusDec.textContent = `Fabric price list loaded — ${rows.length.toLocaleString()} rows indexed, ${trueCount.toLocaleString()} marked TRUE (${file.name})`;
+      fabricPriceStatusDec.className = 'status ok';
+    } catch (err) {
+      console.error(err);
+      decathlonFabricPriceIndex = null;
+      decathlonFabricPriceRowCount = 0;
+      fabricPriceStatusDec.textContent = 'Could not read fabric price list: ' + err.message;
+      fabricPriceStatusDec.className = 'status err';
     }
   });
 }
@@ -1448,8 +1608,11 @@ addAnotherCcBtn.addEventListener('click', () => {
 
 cbdBtnDec.addEventListener('click', async () => {
   if (ccSessions.length === 0) return;
-  if (!decathlonPriceIndex) {
-    const proceed = confirm('No price list loaded — Unit Price will be left blank (except flat-rate items like thread/labels/RFID/interlining). Continue anyway?');
+  if (!decathlonPriceIndex || !decathlonFabricPriceIndex) {
+    const missing = [];
+    if (!decathlonPriceIndex) missing.push('Accessories price list not loaded — accessory Unit Price will be left blank (except flat-rate items like thread/labels/RFID/interlining).');
+    if (!decathlonFabricPriceIndex) missing.push('Fabric price list not loaded — fabric price, supplier, usable width and Api marker will be left blank.');
+    const proceed = confirm(missing.join('\n\n') + '\n\nContinue anyway?');
     if (!proceed) return;
   }
   cbdBtnDec.disabled = true;
@@ -1459,7 +1622,7 @@ cbdBtnDec.addEventListener('click', async () => {
   cbdStatusDec.className = 'status';
   try {
     const templateBuffer = base64ToArrayBuffer(DECATHLON_TEMPLATE_B64);
-    const { buffer, report } = await buildMultiCCCostBreakDown(templateBuffer, ccSessions, decathlonPriceIndex);
+    const { buffer, report } = await buildMultiCCCostBreakDown(templateBuffer, ccSessions, decathlonPriceIndex, decathlonFabricPriceIndex);
     const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
