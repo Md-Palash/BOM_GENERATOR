@@ -278,12 +278,17 @@
         </div>
         <div class="hero-right-dec">
           <div class="dec-price-card">
-            <div class="badge"><span class="dot"></span>Price List</div>
+            <div class="badge"><span class="dot"></span>Price Lists</div>
+            <label class="dec-price-upload-label" for="fabricPriceFileInputDec">
+              Upload Fabric Price List (.xlsx)
+              <input type="file" id="fabricPriceFileInputDec" accept=".xlsx,.xls" style="display:none;">
+            </label>
+            <div class="status" id="fabricPriceStatusDec" style="font-size:13px;">No fabric price list loaded — fabric price, supplier, usable width and Api marker left blank</div>
             <label class="dec-price-upload-label" for="priceFileInputDec">
-              Upload Price List (.xlsx)
+              Upload Accessories Price List (.xlsx)
               <input type="file" id="priceFileInputDec" accept=".xlsx,.xls" style="display:none;">
             </label>
-            <div class="status" id="priceStatusDec" style="font-size:13px;">No price list loaded — Unit Price left blank except flat-rate items</div>
+            <div class="status" id="priceStatusDec" style="font-size:13px;">No accessories price list loaded — Unit Price left blank except flat-rate items</div>
           </div>
         </div>
       </div>
