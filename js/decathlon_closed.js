@@ -506,13 +506,25 @@ function dcbMarkerString(ws, r) {
   return dcbCellText(ws, r, DCB.marker);
 }
 
-// "Last 7 digits of the Designation" is the item code; the first token (if
-// it is a plain number) is the DSM code.
-function dcbParseDesignation(des) {
-  const tokens = des.trim().split(/\s+/);
-  const dsm = /^\d{6,12}$/.test(tokens[0]) ? tokens[0] : '';
-  const m = tokens.length > 1 ? des.trim().match(/(\d{7})$/) : null;
-  return { dsm, itemCode: m ? m[1] : '' };
+// DSM = the FIRST 10 digits of the Designation (sometimes the first 7);
+// item code = the LAST 7 digits. The digits do not have to be a separate
+// "word" - they are read straight off the start / end of the text. The sheet's
+// own DSM column (C, =LEFT(B,10) or LEFT(B,7)) is used as a hint for the 7-vs-10
+// decision when available.
+function dcbParseDesignation(des, dsmHint) {
+  const s = des.trim();
+  let dsm = '';
+  if (dsmHint && /^\d{7,10}$/.test(dsmHint) && s.startsWith(dsmHint)) {
+    dsm = dsmHint;
+  } else {
+    const m10 = s.match(/^(\d{10})/);
+    const m7 = s.match(/^(\d{7})/);
+    dsm = m10 ? m10[1] : (m7 ? m7[1] : '');
+  }
+  let itemCode = '';
+  const m = s.match(/(\d{7})\s*$/);
+  if (m && m.index >= dsm.length) itemCode = m[1];
+  return { dsm, itemCode };
 }
 
 function dcbApplyPricing(ws, r, pricing) {
@@ -557,6 +569,10 @@ function dcbProcessSheet(wb, ws, L, opts) {
   const before = dcbSnapshot(eng1, ws, L, items, true);
   for (const it of items) {
     const p = dcbEvalNumber(eng1, ws, it.r, DCB.price, true);
+    try {
+      const hv = eng1.get(name, it.r, DCB.dsm);
+      it.dsmHint = (typeof hv === 'string' || typeof hv === 'number') ? String(hv).trim() : '';
+    } catch (e) { it.dsmHint = ''; }
     it.old = {
       price: p,
       supplier: dcbCellText(ws, it.r, DCB.supplier).trim(),
@@ -573,7 +589,7 @@ function dcbProcessSheet(wb, ws, L, opts) {
   for (const it of items) {
     const { sec, r, des } = it;
     const part = dcbCellText(ws, r, DCB.type).trim();
-    const { dsm, itemCode } = dcbParseDesignation(des);
+    const { dsm, itemCode } = dcbParseDesignation(des, it.dsmHint);
     // Same row shape the Open Book engine prices: Type + DSM + Item code,
     // with the whole Designation kept in `component` so keyword rules
     // (e.g. interlining detection) still see the full text.
@@ -585,7 +601,7 @@ function dcbProcessSheet(wb, ws, L, opts) {
 
     let pricing = null;
     if (!flat && !dsm) {
-      it.kind = 'skip'; it.status = 'Skipped – no DSM'; it.remark = 'No DSM code in Designation; row left unchanged.';
+      it.kind = 'skip'; it.status = 'Skipped – no DSM'; it.remark = 'No 10/7-digit DSM at the start of the Designation (starts with "' + des.slice(0, 24) + '"); row left unchanged.';
     } else if (fabricStyle && !opts.fabricIdx) {
       it.kind = 'skip'; it.status = 'Skipped – fabric list not loaded'; it.remark = 'Upload a fabric price list to update this row.';
     } else if (!fabricStyle && !flat && !opts.accIdx) {
@@ -737,6 +753,18 @@ function dcbBuildReport(run, meta) {
     { label: 'VENDOR PRICE', get: sn => sn.vendor, kind: 'total' },
   ];
 
+  const THIN = { style: 'thin', color: { argb: 'FFBFC5CE' } };
+  const BORDER = { top: THIN, left: THIN, bottom: THIN, right: THIN };
+  const CENTER = { horizontal: 'center', vertical: 'middle', wrapText: true };
+  const TOTAL_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEFF4FF' } };
+  // merge the Tab cell down each tab's block, centered
+  function mergeTabBlock(ws, r1, r2) {
+    if (r2 > r1) ws.mergeCells(r1, 1, r2, 1);
+    const c = ws.getCell(r1, 1);
+    c.alignment = CENTER; c.font = { bold: true };
+    for (let r = r1; r <= r2; r++) ws.getCell(r, 1).border = BORDER;
+  }
+
   /* ---------- Summary ---------- */
   const ws1 = wb.addWorksheet('Summary');
   ws1.getCell('A1').value = 'Decathlon Price Update — Change Report';
@@ -746,99 +774,118 @@ function dcbBuildReport(run, meta) {
     ['Cost sheet (previous version)', meta.costSheetName],
     ['Fabric price list', meta.fabricInfo],
     ['Accessories price list', meta.accInfo],
-    ['All amounts', 'USD price (column U / L of the cost sheet). Δ = After − Before.'],
+    ['All amounts', 'USD price. Δ = After − Before.'],
   ];
   info.forEach((p, i) => {
     ws1.getCell(3 + i, 1).value = p[0]; ws1.getCell(3 + i, 1).font = { bold: true };
     ws1.getCell(3 + i, 2).value = p[1];
   });
-  let r0 = 3 + info.length + 1;
-  const sumHead = ['Tab', 'Product', 'CC', 'Items scanned', 'Price updated', 'Price added', 'Info updated', 'No change', 'Not updated', 'Skipped',
-    'Total BOM cost – before', 'Total BOM cost – after', 'Δ BOM', 'Δ BOM %', 'Vendor price – before', 'Vendor price – after', 'Δ Vendor', 'Δ Vendor %'];
-  sumHead.forEach((h, i) => { ws1.getCell(r0, i + 1).value = h; });
-  styleHeader(ws1, r0, sumHead.length);
-  run.results.forEach((s, i) => {
-    const r = r0 + 1 + i;
-    const c = s.counts;
-    [s.sheetName, s.productName, s.cc, c.total, c.priceUpdated, c.priceAdded, c.infoUpdated, c.noChange, c.notUpdated, c.skipped,
-      s.before.bom, s.after.bom].forEach((v, j) => { ws1.getCell(r, j + 1).value = v; });
-    putDelta(ws1, r, 11, 12, 13, 14, s.before.bom, s.after.bom);
-    ws1.getCell(r, 15).value = s.before.vendor; ws1.getCell(r, 16).value = s.after.vendor;
-    putDelta(ws1, r, 15, 16, 17, 18, s.before.vendor, s.after.vendor);
-    [11, 12, 15, 16].forEach(n => { ws1.getCell(r, n).numFmt = MONEY; });
-    if (c.notUpdated) ws1.getCell(r, 9).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEE2E2' } };
+  const hr = 3 + info.length + 1;            // group-header row; sub-header = hr + 1
+  const GROUPS = [
+    { title: 'Total BOM cost',   get: sn => sn.bom, key: true },
+    { title: 'Total CM price',   get: sn => sn.cm },
+    { title: 'Total other costs', get: sn => sn.other },
+    { title: 'EXW price',        get: sn => sn.exw },
+    { title: 'VENDOR PRICE',     get: sn => sn.vendor, key: true },
+  ];
+  ['Tab', 'Product', 'CC'].forEach((h, i) => {
+    ws1.getCell(hr, i + 1).value = h;
+    ws1.mergeCells(hr, i + 1, hr + 1, i + 1);
   });
-  const tr = r0 + 1 + run.results.length;
-  ws1.getCell(tr, 1).value = 'TOTAL (all tabs)'; ws1.getCell(tr, 1).font = { bold: true };
-  for (let n = 4; n <= 10; n++) {
-    const col = ws1.getColumn(n).letter;
-    ws1.getCell(tr, n).value = { formula: `SUM(${col}${r0 + 1}:${col}${tr - 1})`, result: run.results.reduce((s, x) => s + [x.counts.total, x.counts.priceUpdated, x.counts.priceAdded, x.counts.infoUpdated, x.counts.noChange, x.counts.notUpdated, x.counts.skipped][n - 4], 0) };
-    ws1.getCell(tr, n).font = { bold: true };
-  }
+  GROUPS.forEach((g, gi) => {
+    const c0 = 4 + gi * 4;
+    ws1.getCell(hr, c0).value = g.title;
+    ws1.mergeCells(hr, c0, hr, c0 + 3);
+    ['Before', 'After', 'Δ', 'Δ %'].forEach((h, k) => { ws1.getCell(hr + 1, c0 + k).value = h; });
+  });
+  const nSumCols = 3 + GROUPS.length * 4;
+  styleHeader(ws1, hr, nSumCols); styleHeader(ws1, hr + 1, nSumCols);
+  run.results.forEach((s, i) => {
+    const r = hr + 2 + i;
+    [s.sheetName, s.productName, s.cc].forEach((v, j) => { ws1.getCell(r, j + 1).value = v; ws1.getCell(r, j + 1).alignment = { vertical: 'middle', horizontal: j === 0 ? 'center' : 'left', wrapText: true }; });
+    GROUPS.forEach((g, gi) => {
+      const c0 = 4 + gi * 4;
+      const bv = g.get(s.before), av = g.get(s.after);
+      ws1.getCell(r, c0).value = bv; ws1.getCell(r, c0 + 1).value = av;
+      ws1.getCell(r, c0).numFmt = MONEY; ws1.getCell(r, c0 + 1).numFmt = MONEY;
+      putDelta(ws1, r, c0, c0 + 1, c0 + 2, c0 + 3, bv, av);
+      if (g.key) for (let k = 0; k < 4; k++) ws1.getCell(r, c0 + k).fill = TOTAL_FILL;
+    });
+    for (let c = 1; c <= nSumCols; c++) ws1.getCell(r, c).border = BORDER;
+  });
+  const lastSum = hr + 1 + run.results.length;
   if (run.skippedTabs.length) {
-    ws1.getCell(tr + 2, 1).value = 'Tabs not treated as cost sheets (left untouched):';
-    ws1.getCell(tr + 2, 1).font = { bold: true };
-    ws1.getCell(tr + 2, 2).value = run.skippedTabs.join(', ');
+    ws1.getCell(lastSum + 2, 1).value = 'Tabs not treated as cost sheets (left untouched):';
+    ws1.getCell(lastSum + 2, 1).font = { bold: true };
+    ws1.getCell(lastSum + 2, 2).value = run.skippedTabs.join(', ');
   }
-  const widths = [26, 28, 12, 12, 12, 12, 12, 12, 12, 12, 18, 18, 14, 12, 18, 18, 14, 12];
-  widths.forEach((w, i) => { ws1.getColumn(i + 1).width = w; });
-  ws1.getColumn(1).width = 30;
-  ws1.views = [{ state: 'frozen', ySplit: r0 }];
+  ws1.getColumn(1).width = 30; ws1.getColumn(2).width = 28; ws1.getColumn(3).width = 12;
+  for (let c = 4; c <= nSumCols; c++) ws1.getColumn(c).width = ((c - 4) % 4 >= 2) ? 13 : 16;
+  ws1.views = [{ state: 'frozen', ySplit: hr + 1, xSplit: 3 }];
 
   /* ---------- Section Costs ---------- */
   const ws2 = wb.addWorksheet('Section Costs');
   const h2 = ['Tab', 'Line', 'Before (USD)', 'After (USD)', 'Δ (USD)', 'Δ %'];
-  h2.forEach((h, i) => { ws2.getCell(1, i + 1).value = h; });
-  styleHeader(ws2, 1, h2.length);
+  h2.forEach((h, i) => {
+    const c = ws2.getCell(1, i + 1);
+    c.value = h; c.font = { bold: true }; c.alignment = CENTER; c.border = BORDER;
+  });
+  ws2.getRow(1).height = 24;
   let r2 = 2;
   for (const s of run.results) {
+    const blockStart = r2;
     for (const ln of lineDefs(s)) {
       const b = ln.get(s.before), a = ln.get(s.after);
-      ws2.getCell(r2, 1).value = s.sheetName;
       ws2.getCell(r2, 2).value = ln.label;
       ws2.getCell(r2, 3).value = b; ws2.getCell(r2, 4).value = a;
       ws2.getCell(r2, 3).numFmt = MONEY; ws2.getCell(r2, 4).numFmt = MONEY;
       putDelta(ws2, r2, 3, 4, 5, 6, b, a);
-      if (ln.kind === 'total') {
-        for (let c = 1; c <= 6; c++) { ws2.getCell(r2, c).font = { bold: true }; ws2.getCell(r2, c).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEFF4FF' } }; }
+      for (let c = 2; c <= 6; c++) {
+        const cell = ws2.getCell(r2, c);
+        cell.border = BORDER;
+        cell.alignment = { vertical: 'middle', horizontal: c === 2 ? 'left' : 'right' };
+        if (ln.kind === 'total') { cell.font = { bold: true }; cell.fill = TOTAL_FILL; }   // only Total BOM cost & VENDOR PRICE are coloured
       }
       r2++;
     }
+    ws2.getCell(blockStart, 1).value = s.sheetName;
+    mergeTabBlock(ws2, blockStart, r2 - 1);
   }
   [26, 36, 18, 18, 16, 12].forEach((w, i) => { ws2.getColumn(i + 1).width = w; });
   ws2.views = [{ state: 'frozen', ySplit: 1 }];
-  ws2.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: 6 } };
 
   /* ---------- Item Changes ---------- */
   const ws3 = wb.addWorksheet('Item Changes');
   const h3 = ['Tab', 'Section', 'Row', 'Type', 'Designation', 'DSM', 'Item code (last 7)', 'Old price', 'New price', 'Δ price', 'Δ price %',
-    'Old supplier', 'New supplier', 'Old usable width', 'New usable width', 'Old Api marker', 'New Api marker',
+    'Old supplier', 'New supplier', 'Old usable width', 'New usable width',
     'Row cost before (USD)', 'Row cost after (USD)', 'Cost impact (USD)', 'Status', 'Remark'];
   h3.forEach((h, i) => { ws3.getCell(1, i + 1).value = h; });
   styleHeader(ws3, 1, h3.length);
   let r3 = 2;
   for (const s of run.results) {
+    const blockStart = r3;
     for (const it of s.items) {
-      const vals = [s.sheetName, it.sec.label, it.r, it.part, it.des, it.dsm, it.itemCode, it.old.price, it.new.price, null, null,
-        it.old.supplier, it.new.supplier, it.old.width, it.new.width, it.old.marker, it.new.marker,
+      const vals = [null, it.sec.label, it.r, it.part, it.des, it.dsm, it.itemCode, it.old.price, it.new.price, null, null,
+        it.old.supplier, it.new.supplier, it.old.width, it.new.width,
         it.costBefore, it.costAfter, null, it.status, it.remark || ''];
       vals.forEach((v, j) => { if (v !== null && v !== undefined && v !== '') ws3.getCell(r3, j + 1).value = v; });
       ['H', 'I', 'J'].forEach(L => { ws3.getCell(`${L}${r3}`).numFmt = '0.0000'; });
       ws3.getCell(r3, 11).numFmt = PCT;
-      [18, 19, 20].forEach(n => { ws3.getCell(r3, n).numFmt = MONEY; });
+      [16, 17, 18].forEach(n => { ws3.getCell(r3, n).numFmt = MONEY; });
       if (typeof it.old.price === 'number' && typeof it.new.price === 'number') {
         ws3.getCell(r3, 10).value = { formula: `I${r3}-H${r3}`, result: it.new.price - it.old.price };
         ws3.getCell(r3, 11).value = { formula: `IF(H${r3}=0,"",J${r3}/H${r3})`, result: it.old.price === 0 ? '' : (it.new.price - it.old.price) / it.old.price };
       }
       if (typeof it.costBefore === 'number' && typeof it.costAfter === 'number') {
-        ws3.getCell(r3, 20).value = { formula: `S${r3}-R${r3}`, result: it.costAfter - it.costBefore };
+        ws3.getCell(r3, 18).value = { formula: `Q${r3}-P${r3}`, result: it.costAfter - it.costBefore };
       }
       const fill = dcbStatusFill(it.status);
-      if (fill) ws3.getCell(r3, 21).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: fill } };
+      if (fill) ws3.getCell(r3, 19).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: fill } };
       r3++;
     }
+    if (r3 > blockStart) { ws3.getCell(blockStart, 1).value = s.sheetName; mergeTabBlock(ws3, blockStart, r3 - 1); }
   }
-  [24, 18, 7, 22, 52, 13, 14, 11, 11, 11, 10, 20, 20, 16, 16, 16, 16, 16, 16, 16, 24, 60].forEach((w, i) => { ws3.getColumn(i + 1).width = w; });
+  [24, 18, 7, 22, 52, 13, 14, 11, 11, 11, 10, 20, 20, 16, 16, 16, 16, 16, 24, 60].forEach((w, i) => { ws3.getColumn(i + 1).width = w; });
   ws3.views = [{ state: 'frozen', ySplit: 1, xSplit: 5 }];
   ws3.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: h3.length } };
 
@@ -886,7 +933,7 @@ function dcbBuildReport(run, meta) {
   const fabInput = $('fabricPriceFileInputDecC'), fabStatus = $('fabricPriceStatusDecC');
   const accInput = $('priceFileInputDecC'), accStatus = $('priceStatusDecC');
   const goBtn = $('processBtnDecC'), goLabel = $('processLabelDecC'), status = $('statusDecC');
-  const results = $('resultsDecC'), summaryEl = $('summaryDecC');
+  const results = $('resultsDecC');
   const dlCost = $('downloadCostBtnDecC'), dlReport = $('downloadReportBtnDecC');
 
   let costFile = null, fabricIdx = null, fabricInfo = '', accIdx = null, accInfo = '';
@@ -948,8 +995,6 @@ function dcbBuildReport(run, meta) {
   dlCost.addEventListener('click', () => { if (outCost) download(outCost, baseName() + '_price_updated.xlsx'); });
   dlReport.addEventListener('click', () => { if (outReport) download(outReport, baseName() + '_price_update_report.xlsx'); });
 
-  const money = v => (typeof v === 'number' ? v.toFixed(4) : 'n/a');
-
   goBtn.addEventListener('click', async () => {
     if (!costFile) return;
     if (!fabricIdx || !accIdx) {
@@ -976,12 +1021,6 @@ function dcbBuildReport(run, meta) {
       outCost = run.buffer;
       outReport = await reportWb.xlsx.writeBuffer();
 
-      const lines = run.results.map(s => {
-        const c = s.counts;
-        return `<div style="margin-top:8px;"><b>${escapeHtmlDecC(s.sheetName)}</b> — ${c.total} items: ${c.priceUpdated + c.priceAdded} priced, ${c.infoUpdated} info-only, ${c.noChange} unchanged, ${c.notUpdated} not updated, ${c.skipped} skipped. ` +
-          `BOM ${money(s.before.bom)} → ${money(s.after.bom)}; Vendor price ${money(s.before.vendor)} → ${money(s.after.vendor)}</div>`;
-      });
-      summaryEl.innerHTML = lines.join('') + (run.skippedTabs.length ? `<div style="margin-top:8px;color:var(--text-secondary);">Left untouched (not cost sheets): ${escapeHtmlDecC(run.skippedTabs.join(', '))}</div>` : '');
       results.classList.add('show');
       setStatus(`Done — ${run.results.length} tab(s) updated. Download both files below.`, 'ok');
     } catch (err) {
@@ -992,9 +1031,3 @@ function dcbBuildReport(run, meta) {
     }
   });
 })();
-
-function escapeHtmlDecC(s) {
-  const d = document.createElement('div');
-  d.textContent = s;
-  return d.innerHTML;
-}
