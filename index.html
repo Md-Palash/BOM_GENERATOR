@@ -256,6 +256,120 @@
     </div>
   </div>
 
+  <!-- ============ DECATHLON HUB VIEW ============ -->
+  <div class="tool-view" id="decathlonHubView" hidden>
+    <button class="back-btn" id="decHubBackBtn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+      Back
+    </button>
+
+    <div class="home-header">
+      <h1>DECATHLON <span>Workflow</span></h1>
+    </div>
+    <div class="brand-grid">
+      <button class="brand-card" id="decHubOpenCard" style="--glow:rgba(54,67,186,.35); --mark-bg:#3643BA;">
+        <div class="brand-card-mark">
+          <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+        </div>
+        <div class="brand-card-name">Open Book</div>
+      </button>
+      <button class="brand-card" id="decHubClosedCard" style="--glow:rgba(15,118,110,.35); --mark-bg:#0F766E;">
+        <div class="brand-card-mark">
+          <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20"/></svg>
+        </div>
+        <div class="brand-card-name">Closed Book</div>
+      </button>
+    </div>
+  </div>
+
+  <!-- ============ DECATHLON CLOSED BOOK VIEW (price update on an existing cost sheet) ============ -->
+  <div class="tool-view" id="decathlonClosedView" hidden>
+    <button class="back-btn" id="backBtnDecC">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+      Back
+    </button>
+
+    <div class="card hero-card">
+      <div class="hero-top">
+        <div class="hero-copy">
+          <div class="badge"><span class="dot"></span>Decathlon Price Update Utility</div>
+          <h1>Cost Sheet <span class="arrow-glyph">→</span> Updated Prices</h1>
+        </div>
+        <div class="hero-pills">
+          <span class="pill">Closed Book</span>
+        </div>
+      </div>
+      <p class="lede">Upload an existing Decathlon costing workbook (all tabs) together with the latest price lists. Every tab is re-priced with the same rules as Open Book, formulas are left untouched, and a separate change report shows what moved — item by item, section by section, up to the vendor price.</p>
+    </div>
+
+    <div class="dropzone" id="dropzoneDecC">
+      <input type="file" id="fileInputDecC" accept=".xlsx">
+      <div class="dz-icon-wrap">
+        <svg class="dz-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M12 15l-4.5-4.5M12 15l4.5-4.5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+      </div>
+      <div class="dz-title">Drop the cost sheet (.xlsx) here or click to browse</div>
+      <div class="dz-sub">RUNS ENTIRELY IN YOUR BROWSER — NOTHING IS UPLOADED</div>
+    </div>
+
+    <div class="filebar" id="filebarDecC">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+      <span class="name" id="fileNameDecC"></span>
+      <span class="clear" id="clearFileDecC">✕ remove</span>
+    </div>
+
+    <div class="card" style="padding:22px 26px; margin-bottom:20px;">
+      <div class="badge" style="margin-bottom:14px;"><span class="dot"></span>Price Lists</div>
+      <div class="hero-split-dec">
+        <div>
+          <label class="dec-price-upload-label" for="fabricPriceFileInputDecC">
+            Upload Fabric Price List (.xlsx)
+            <input type="file" id="fabricPriceFileInputDecC" accept=".xlsx,.xls" style="display:none;">
+          </label>
+          <div class="status" id="fabricPriceStatusDecC" style="font-size:13px;">No fabric price list loaded</div>
+        </div>
+        <div>
+          <label class="dec-price-upload-label" for="priceFileInputDecC">
+            Upload Accessories Price List (.xlsx)
+            <input type="file" id="priceFileInputDecC" accept=".xlsx,.xls" style="display:none;">
+          </label>
+          <div class="status" id="priceStatusDecC" style="font-size:13px;">No accessories price list loaded</div>
+        </div>
+      </div>
+    </div>
+
+    <button class="btn" id="processBtnDecC" disabled>
+      <svg class="spinner" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"/><path d="M22 12a10 10 0 0 0-10-10" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>
+      <span id="processLabelDecC">Update Prices &amp; Generate Report</span>
+    </button>
+
+    <div class="status" id="statusDecC"></div>
+
+    <div class="results" id="resultsDecC">
+      <div class="card cbd-section">
+        <div class="cbd-head">
+          <div class="icon-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"/><path d="M4 10h16M10 4v16"/></svg>
+          </div>
+          <div>
+            <h2>Price update complete</h2>
+            <p>Download both files. The updated cost sheet recalculates when opened in Excel. The report lists every row's old vs new price, supplier, usable width and Api marker, plus before/after totals for each section, total BOM cost and vendor price.</p>
+            <div id="summaryDecC" style="font-size:13.5px; margin-top:12px; line-height:1.6;"></div>
+          </div>
+        </div>
+        <div style="display:flex; gap:12px; flex-wrap:wrap;">
+          <button class="btn" id="downloadCostBtnDecC" style="flex:1; min-width:220px;">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M12 15l-4.5-4.5M12 15l4.5-4.5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+            Download Updated Cost Sheet
+          </button>
+          <button class="btn secondary" id="downloadReportBtnDecC" style="flex:1; min-width:220px;">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M12 15l-4.5-4.5M12 15l4.5-4.5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+            Download Change Report
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- ============ DECATHLON TOOL VIEW ============ -->
   <div class="tool-view" id="decathlonView" hidden>
     <button class="back-btn" id="backBtnDec">
@@ -798,6 +912,7 @@
 <script src="js/shared.js"></script>
 <script src="js/haddad.js"></script>
 <script src="js/decathlon.js"></script>
+<script src="js/decathlon_closed.js"></script>
 <script src="js/malacca.js"></script>
 <script src="js/kariban.js"></script>
 <script src="js/portwest.js"></script>
