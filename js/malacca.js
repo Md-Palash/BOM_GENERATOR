@@ -81,7 +81,13 @@ function deriveMalaccaColumnBoundaries(headerItems) {
 
   const candidates = [
     ['placement',          anchorX('Placement', 0)],
-    ['componentName',      anchorX('Compo', 0)],
+    // 'Comp' (not 'Compo'): in narrow-column tech packs the label wraps as
+    // "Comp" / "onent Name" (seen on the Northland pack), which the old
+    // 'Compo' prefix never matched - that made this function return null
+    // and the engine silently fall back to a fixed layout that doesn't fit
+    // such tables (zero rows detected). 'Comp' still matches the older
+    // "Compo"/"Compone" wraps, and can't be confused with 'Comm'.
+    ['componentName',      anchorX('Comp', 0)],
     ['materialType',       materialTypeX],          // optional — absent on some tech packs
     ['material',           materialX],
     ['referenceNo',        anchorX('Refer', 0)],     // optional — absent on some tech packs
@@ -104,15 +110,44 @@ function deriveMalaccaColumnBoundaries(headerItems) {
   }
 
   present.sort((a, b) => a[1] - b[1]);
-  return present.map(([key, x], i) => ({
+
+  // NARROW LAYOUT: some exports (e.g. Northland / Snowtex BOMs) print ~25
+  // columns, each only ~31pt wide, versus ~54pt on the older 15-column
+  // layout. Two things only happen there, so both are gated on it and the
+  // older layout's behavior is left exactly as it was:
+  //  (a) Columns the engine doesn't read (CCC, colorway swatches, Primary?,
+  //      Alt Primary?, Loss %, CIF ...) must still be anchors. Otherwise
+  //      their data falls inside the 60%-of-gap range of the previous
+  //      required column - e.g. "Yes"/"No" from 'Primary?' was being glued
+  //      onto Article UOM ("m Yes").
+  //  (b) Cells are narrower than most words, so the PDF breaks words and
+  //      numbers mid-token across lines (see malaccaJoinFragments).
+  const gaps = [];
+  for (let i = 1; i < present.length; i++) gaps.push(present[i][1] - present[i - 1][1]);
+  const medianGap = gaps.length ? gaps.slice().sort((a, b) => a - b)[Math.floor(gaps.length / 2)] : Infinity;
+  const narrow = medianGap < 40;
+
+  let anchors = present;
+  if (narrow) {
+    const minY = Math.min(...headerItems.map(it => it.y));
+    const firstLine = headerItems.filter(it => Math.abs(it.y - minY) < 2.5);
+    const extras = firstLine
+      .filter(it => !present.some(([, x]) => Math.abs(x - it.x) < 3))
+      .map(it => ['_other', it.x]);
+    anchors = [...present, ...extras].sort((a, b) => a[1] - b[1]);
+  }
+
+  const cols = anchors.map(([key, x], i) => ({
     key,
     // Biased toward the next anchor (60% of the gap) rather than a strict
     // midpoint: column labels are short and left-aligned, but the actual
     // data (e.g. a long Placement description) can run wider than the
     // label alone suggests. A strict midpoint risks classifying the tail
     // of a long value into the next column.
-    max: i + 1 < present.length ? x + (present[i + 1][1] - x) * 0.6 : Infinity,
+    max: i + 1 < anchors.length ? x + (anchors[i + 1][1] - x) * 0.6 : Infinity,
   }));
+  cols.narrow = narrow;
+  return cols;
 }
 
 function classifyMalaccaColumn(x, columns) {
@@ -235,6 +270,62 @@ function extractMalaccaCoverInfo(items) {
 // otherwise be misread as BOM rows.
 const MALACCA_BOM_PAGE_RE = /\bBOM[_:]/i;
 
+// Narrow-layout variant of the row-start test. In ~31pt-wide cells a number
+// like "480.0000" or "1.8800" is itself wrapped across lines ("480." / "000"
+// / "0", "1.88" / "00"), so the first fragment may end right after the dot.
+// Only the FIRST fragment carries the dot, so continuation fragments
+// ("00", "000") can never be mistaken for a new row.
+const MALACCA_CONSUMPTION_NARROW_RE = /^\d+\.\d*$/;
+
+// Narrow layout only: cells are narrower than many words, so the PDF breaks
+// words in the middle ("Polyes" / "ter", "Linin" / "g") as well as between
+// them ("Rip" / "Stop"). Nothing in the PDF says which kind of break it was,
+// so decide from geometry + character class: a break is mid-word when both
+// sides are the same kind of character (lower/lower, UPPER/UPPER, digit/digit)
+// AND the previous line was already full - i.e. not even one more character
+// of the next fragment would have fit in the widest line this column ever
+// holds. (A short line followed by a lowercase word, e.g. "ot" / "fleece", is
+// a word break and keeps its space.) This is a best-effort heuristic: where a
+// word break happens to coincide with a completely full line it can't be told
+// apart from a mid-word break.
+// Rough glyph widths (pt) for the ~8pt sans font these exports use - only
+// needs to be good enough to tell "one more character would not fit".
+function malaccaCharW(ch) {
+  if ('ijl'.includes(ch)) return 2;
+  if ('tfr'.includes(ch)) return 3;
+  if ('mw'.includes(ch)) return 6.5;
+  if ('WM'.includes(ch)) return 8;
+  if (ch === 'I') return 2.5;
+  if (/[A-Z]/.test(ch)) return 5.8;
+  return 4.6;
+}
+// Character class used to decide whether two fragments can be one token:
+// only same-class neighbours join (a -> b, A -> B, 1 -> 2). A class change
+// (e.g. "21183" / "Rip", "110.00" / "gsm", "Stop" / "Polyes") is a real
+// word boundary.
+function malaccaCharClass(ch) {
+  if (/[a-z]/.test(ch)) return 'l';
+  if (/[A-Z]/.test(ch)) return 'u';
+  if (/[0-9]/.test(ch)) return 'd';
+  return null;
+}
+function malaccaJoinFragments(frags, maxW) {
+  let out = frags[0].t;
+  for (let i = 1; i < frags.length; i++) {
+    const prev = frags[i - 1], next = frags[i].t;
+    const pc = malaccaCharClass(prev.t.slice(-1)), nc = malaccaCharClass(next[0]);
+    // break right after a hyphen ("Easti-" / "Tex", "Logo-" / "Print") is a
+    // hyphenation break, not a word break - but " -" (spaced dash) is not.
+    const afterHyphen = /\S-$/.test(prev.t) && nc !== null;
+    // An UPPERCASE continuation must itself be all-caps ("NOMI" / "NEE"); a
+    // Title-Case start ("ACF" / "Label", "STD" / "Silica") is a new word.
+    const capsOk = pc !== 'u' || /^[A-Z0-9]+(?:\s|$)/.test(next);
+    const midWord = pc !== null && pc === nc && capsOk && prev.w + malaccaCharW(next[0]) > maxW - 0.5;
+    out += (afterHyphen || midWord ? '' : ' ') + next;
+  }
+  return out;
+}
+
 // Tokens that make up the (multi-line) BOM table header/its wrapped
 // fragments — used to skip header rows during extraction. Hoisted to a
 // constant so it isn't reallocated on every line of every page.
@@ -285,7 +376,7 @@ async function extractMalaccaPdf(file, onProgress) {
     const items = content.items
       .map(it => {
         const tx = pdfjsLib.Util.transform(viewport.transform, it.transform);
-        return { text: it.str, x: tx[4], y: tx[5] };
+        return { text: it.str, x: tx[4], y: tx[5], w: it.width };
       })
       .filter(it => it.text.trim().length > 0);
 
@@ -363,10 +454,13 @@ async function extractMalaccaPdf(file, onProgress) {
 
       if (!currentSection) continue;
 
+      const narrow = !!(columnBoundaries && columnBoundaries.narrow);
       const cols = blankCols();
+      const colW = {}; // total glyph width per column on this line (narrow-layout word joining)
       for (const it of line.items) {
         const key = classifyMalaccaColumn(it.x, columnBoundaries);
         cols[key] = (cols[key] ? cols[key] + ' ' : '') + it.text;
+        colW[key] = (colW[key] || 0) + (it.w || 0);
       }
 
       // pdf.js can split a single number like "0.0000" across multiple
@@ -374,19 +468,49 @@ async function extractMalaccaPdf(file, onProgress) {
       // rejoined above with a space (e.g. "0. 0000"). Strip whitespace
       // before testing so a fragmented consumption value still matches.
       const consumptionVal = cols.consumption.replace(/\s+/g, '');
-      if (MALACCA_CONSUMPTION_RE.test(consumptionVal)) {
+      const isRowStart = (narrow ? MALACCA_CONSUMPTION_NARROW_RE : MALACCA_CONSUMPTION_RE).test(consumptionVal);
+      if (isRowStart) {
         flushRow();
         activeRow = {};
-        for (const k of Object.keys(cols)) activeRow[k] = cols[k].trim();
+        const frags = {};
+        for (const k of Object.keys(cols)) {
+          if (k[0] === '_') continue; // '_other' = columns the engine doesn't read
+          activeRow[k] = cols[k].trim();
+          if (cols[k].trim()) frags[k] = [{ t: cols[k].trim(), w: colW[k] || 0 }];
+        }
         activeRow.consumption = consumptionVal; // use the whitespace-stripped value
+        if (narrow) Object.defineProperty(activeRow, '_frags', { value: frags, enumerable: false });
       } else if (activeRow) {
         for (const k of Object.keys(cols)) {
-          if (cols[k].trim()) activeRow[k] = (activeRow[k] ? activeRow[k] + ' ' : '') + cols[k].trim();
+          if (k[0] === '_' || !cols[k].trim()) continue;
+          if (narrow && k === 'consumption') {
+            // wrapped number: glue the digits back on, no space
+            activeRow.consumption += cols[k].replace(/\s+/g, '');
+          } else {
+            activeRow[k] = (activeRow[k] ? activeRow[k] + ' ' : '') + cols[k].trim();
+            if (narrow && activeRow._frags) (activeRow._frags[k] = activeRow._frags[k] || []).push({ t: cols[k].trim(), w: colW[k] || 0 });
+          }
         }
       }
     }
   }
   flushRow();
+
+  // Narrow layout: now that every row is known, rebuild wrapped text cells.
+  // The widest line seen per column is the best available estimate of that
+  // column's real cell width (see malaccaJoinFragments).
+  const maxW = {};
+  const allRows = Object.values(sections).flat();
+  for (const row of allRows) {
+    if (!row._frags) continue;
+    for (const [k, fr] of Object.entries(row._frags)) for (const f of fr) maxW[k] = Math.max(maxW[k] || 0, f.w);
+  }
+  for (const row of allRows) {
+    if (!row._frags) continue;
+    for (const [k, fr] of Object.entries(row._frags)) {
+      if (fr.length > 1) row[k] = malaccaJoinFragments(fr, maxW[k]);
+    }
+  }
 
   return { sections, styleNumber, coverInfo }; // sections: { '01 - Fabric': [...], '02 - Trims': [...], ... }
 }
