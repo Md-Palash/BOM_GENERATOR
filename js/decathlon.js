@@ -1404,16 +1404,30 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs
 /* ============================================================
    DECATHLON — UI WIRING
    ============================================================ */
-const decathlonView = document.getElementById('decathlonView');
+const decathlonView = document.getElementById('decathlonView');            // Open Book (generate costing from tech pack)
+const decathlonHubView = document.getElementById('decathlonHubView');      // Open Book / Closed Book chooser
+const decathlonClosedView = document.getElementById('decathlonClosedView'); // Closed Book (price update on existing cost sheet)
 document.getElementById('brandDecathlon').addEventListener('click', () => {
   requestUnlock('decathlon', () => {
     homeView.hidden = true;
-    decathlonView.hidden = false;
+    decathlonHubView.hidden = false;
   });
+});
+document.getElementById('decHubBackBtn').addEventListener('click', () => {
+  decathlonHubView.hidden = true;
+  homeView.hidden = false;
+});
+document.getElementById('decHubOpenCard').addEventListener('click', () => {
+  decathlonHubView.hidden = true;
+  decathlonView.hidden = false;
+});
+document.getElementById('decHubClosedCard').addEventListener('click', () => {
+  decathlonHubView.hidden = true;
+  decathlonClosedView.hidden = false;
 });
 document.getElementById('backBtnDec').addEventListener('click', () => {
   decathlonView.hidden = true;
-  homeView.hidden = false;
+  decathlonHubView.hidden = false;
 });
 
 const dropzoneDec = document.getElementById('dropzoneDec');
