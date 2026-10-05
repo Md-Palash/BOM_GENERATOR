@@ -581,6 +581,10 @@ function dcbApplyPricing(ws, r, pricing) {
    ============================================================ */
 const DCB_TPL_KEYS = ['Fabrics', 'Legal Marking', 'Label', 'Graphic', 'Accessories', 'Sales Packaging', 'Transport Packaging'];
 const DCB_RED = 'FFCC0000';
+// Columns the Open Book engine writes as INPUTS (type, designation, model, supplier, width, unit, price, ...).
+// A template formula sitting in one of these (e.g. Sales Packaging's  L = 1/G173)  is a starter value, not
+// a calculation - it must never be forced back onto an item row.
+const DCB_INPUT_COLS = new Set([1, 2, 4, 6, 7, 8, 9, 10, 12, 13, 14, 17, 18, 22]);
 
 function dcbTemplateInfo(tplWs) {
   const secs = {};
@@ -675,10 +679,11 @@ function dcbRepairSheet(ws, L, T, items) {
       const cell = ws.getCell(r, c);
       if (tc.type === ExcelJS.ValueType.Formula && tc.formula) {
         if (cell.type === ExcelJS.ValueType.Formula) continue; // never overwrite an existing formula
+        if (isItemRow && DCB_INPUT_COLS.has(c)) continue;      // input column on an item row - leave the user's value
         let f = dcbTranslateFormula(tc.formula, mapRow);
         if (isItemRow && c === DCB.dsm && dsm7.has(r)) f = f.replace(/,\s*10\)/, ',7)');
+        out.formulas.push({ addr: cell.address, formula: '=' + f, cell, old: cell.value });
         cell.value = { formula: f };
-        out.formulas.push({ addr: cell.address, formula: '=' + f });
       } else if (isItemRow && c === 20 && tc.value === 'USD') { // "Local currency" label that every row carries
         if (cell.value === null || cell.value === undefined || cell.value === '') { cell.value = 'USD'; out.formulas.push({ addr: cell.address, formula: 'USD', label: true }); }
       }
@@ -702,10 +707,23 @@ function dcbRepairSheet(ws, L, T, items) {
     const lc = ws.getCell(L.localRow, DCB.localTransportVal);
     if (lc.type !== ExcelJS.ValueType.Formula) {
       const f = `SUM(V${M.cur['Fabrics'].headerRow}:V${M.cur['Transport Packaging'].totalRow})`;
+      out.formulas.push({ addr: lc.address, formula: '=' + f, cell: lc, old: lc.value });
       lc.value = { formula: f };
-      out.formulas.push({ addr: lc.address, formula: '=' + f });
     }
   }
+
+  // Safety net: a restored formula must never introduce an error. If one would (bad/missing inputs it
+  // depends on), put the previous cell content back and report it instead.
+  out.notRestored = [];
+  for (let pass = 0; pass < 4; pass++) {
+    const eng = new DecFormulaEngine(ws.workbook);
+    const bad = out.formulas.filter(x => x.cell && !x.undone && (() => {
+      try { return eng.get(ws.name, x.cell.row, x.cell.col) instanceof DecXlError; } catch (e) { return false; }
+    })());
+    if (!bad.length) break;
+    for (const x of bad) { x.cell.value = x.old === undefined ? null : x.old; x.undone = true; out.notRestored.push({ addr: x.addr, formula: x.formula }); }
+  }
+  out.formulas = out.formulas.filter(x => !x.undone).map(x => ({ addr: x.addr, formula: x.formula, label: x.label }));
 
   // styles (ascending row order on purpose - see ExcelJS note in kariban.js)
   const lastRow = L.bomRow + (T.last - T.bom);
@@ -1160,6 +1178,7 @@ function dcbBuildReport(run, meta) {
     const blockStart = r5;
     const rp = s.repairs || { formulas: [], styles: [], dropdowns: [] };
     rp.formulas.forEach(x => { put(ws5, r5, 2, x.label ? 'Label restored' : 'Formula restored'); put(ws5, r5, 3, x.addr); put(ws5, r5, 4, x.formula); r5++; });
+    (rp.notRestored || []).forEach(x => { put(ws5, r5, 2, 'Formula NOT restored'); put(ws5, r5, 3, x.addr); put(ws5, r5, 4, x.formula + '  — would give an error with the current inputs; cell left as it was'); r5++; });
     rp.dropdowns.forEach(x => { put(ws5, r5, 2, 'Dropdown restored'); put(ws5, r5, 3, x.addr); put(ws5, r5, 4, 'Width unit / Per unit list'); r5++; });
     rp.styles.slice(0, STYLE_CAP).forEach(x => { put(ws5, r5, 2, 'Format reverted to template'); put(ws5, r5, 3, x.addr); put(ws5, r5, 4, x.what); r5++; });
     if (rp.styles.length > STYLE_CAP) { put(ws5, r5, 2, 'Format reverted to template'); put(ws5, r5, 3, '…'); put(ws5, r5, 4, `${rp.styles.length - STYLE_CAP} more cells`); r5++; }
