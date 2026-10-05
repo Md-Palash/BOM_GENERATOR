@@ -499,6 +499,22 @@ function dcbSnapshot(engine, ws, L, itemRows, cachedFallback) {
   return snap;
 }
 
+// Price-cell colour rule (updated cost sheet, column I):
+//   green = price changed (updated / newly added)
+//   pink  = price same as previous
+//   red   = any issue (lookup failed / list not loaded / no DSM) - previous price is KEPT, value untouched
+// Fixed template rows with no DSM in the packaging sections are not an issue and are left uncoloured.
+const DCB_PRICE_COLORS = { changed: 'FFB7E1A1', same: 'FFFFC0CB', issue: 'FFFF7C80' };
+function dcbIsIssue(it) {
+  if (it.kind === 'fail') return true;
+  if (it.kind === 'skip') return !(it.status === 'Skipped – no DSM' && (it.sec.name === 'Sales Packaging' || it.sec.name === 'Transport Packaging'));
+  return false;
+}
+function dcbPriceColorKey(it) {
+  if (it.kind === 'ok') return (it.status === 'Price updated' || it.status === 'Price added') ? 'changed' : 'same';
+  return dcbIsIssue(it) ? 'issue' : null;
+}
+
 function dcbMarkerString(ws, r) {
   const cell = ws.findCell(r, DCB.marker);
   if (!cell || cell.value === null || cell.value === undefined) return '';
@@ -547,6 +563,176 @@ function dcbApplyPricing(ws, r, pricing) {
   else if (dcbCellText(ws, r, DCB.model) === 'Highest price taken') dCell.value = null;
 
   if (pricing.usableWidth !== undefined) ws.getCell(r, DCB.width).value = pricing.usableWidth || null;
+}
+
+/* ============================================================
+   3b. TEMPLATE REPAIR
+   The original Decathlon template (embedded in decathlon.js) is the single
+   source of truth for how a cost sheet should look and calculate. After
+   re-pricing, every cost-sheet tab is checked against it:
+     - a formula the template has but the sheet lost  -> written back
+     - a cell whose colours / font / alignment / borders / number format
+       drifted from the template                      -> reverted
+     - a dropdown (Width Unit / Per unit) that is missing -> restored
+   Existing formulas are never overwritten. Rows are matched to the template
+   by section (so sheets that grew by row insertion line up correctly).
+   The red "price not found" text in Component supplier is intentional
+   formatting and is kept.
+   ============================================================ */
+const DCB_TPL_KEYS = ['Fabrics', 'Legal Marking', 'Label', 'Graphic', 'Accessories', 'Sales Packaging', 'Transport Packaging'];
+const DCB_RED = 'FFCC0000';
+
+function dcbTemplateInfo(tplWs) {
+  const secs = {};
+  for (const k of DCB_TPL_KEYS) {
+    const c = DECATHLON_SECTION_CONFIG[k];
+    secs[k] = { header: c.headerRow, first: c.firstBlank, last: c.lastBlank, total: c.totalRow };
+    const def = DCB_SECTION_DEFS.find(d => d.name === k);
+    if (!def.re.test(dcbCellText(tplWs, c.headerRow, 1).trim())) return null; // template layout isn't what we expect
+  }
+  let bom = null, last = 0;
+  for (let r = 1; r <= tplWs.rowCount; r++) {
+    if (bom === null && /^total bom cost$/i.test(dcbCellText(tplWs, r, 1).trim())) bom = r;
+    for (let c = 1; c <= DCB_MAXCOL; c++) {
+      const x = tplWs.findCell(r, c);
+      if (x && x.value !== null && x.value !== undefined && x.value !== '') { last = r; break; }
+    }
+  }
+  if (!bom) return null;
+  return { ws: tplWs, secs, bom, last };
+}
+
+function dcbMakeMapper(L, T) {
+  const cur = {};
+  L.sections.forEach(s => { cur[s.name] = s; });
+  // template row -> this sheet's row
+  const toCur = rT => {
+    if (rT <= 10) return rT;
+    for (const k of DCB_TPL_KEYS) {
+      const t = T.secs[k], c = cur[k];
+      if (!c) continue;
+      if (rT === t.header) return c.headerRow;
+      if (rT === t.last) return c.lastRow;
+      if (rT >= t.first && rT < t.last) return Math.min(c.firstRow + (rT - t.first), c.lastRow);
+      if (rT === t.total) return c.totalRow;
+    }
+    if (rT >= T.bom) return L.bomRow + (rT - T.bom);
+    return null;
+  };
+  // this sheet's row -> template row (inserted rows take the last blank row's look)
+  const toTpl = r => {
+    if (r <= 10) return r;
+    for (const k of DCB_TPL_KEYS) {
+      const t = T.secs[k], c = cur[k];
+      if (!c) continue;
+      if (r === c.headerRow) return t.header;
+      if (r === c.lastRow) return t.last;
+      if (r >= c.firstRow && r < c.lastRow) return t.first + Math.min(r - c.firstRow, t.last - t.first);
+      if (r === c.totalRow) return t.total;
+    }
+    if (r >= L.bomRow && r <= L.bomRow + (T.last - T.bom)) return T.bom + (r - L.bomRow);
+    return null;
+  };
+  return { cur, toCur, toTpl };
+}
+
+function dcbColorKey(c) {
+  if (!c) return '';
+  if (c.argb) return c.argb;
+  if (c.theme !== undefined) return 't' + c.theme + ':' + (c.tint || 0);
+  if (c.indexed !== undefined) return 'i' + c.indexed;
+  return '';
+}
+function dcbStyleParts(st) {
+  st = st || {};
+  const f = st.fill || {}, fo = st.font || {}, a = st.alignment || {}, b = st.border || {};
+  const side = k => (b[k] ? (b[k].style || '') + dcbColorKey(b[k].color) : '');
+  return {
+    fill: [f.type || '', f.pattern || '', dcbColorKey(f.fgColor), dcbColorKey(f.bgColor)].join('|'),
+    fontColor: dcbColorKey(fo.color),
+    font: [fo.name || '', fo.size || '', !!fo.bold, !!fo.italic, !!fo.underline, !!fo.strike].join('|'),
+    alignment: [a.horizontal || '', a.vertical || '', !!a.wrapText, a.indent || 0, a.textRotation || 0].join('|'),
+    border: ['left', 'right', 'top', 'bottom'].map(side).join('|'),
+    numFmt: st.numFmt || 'General',
+  };
+}
+const DCB_PART_LABEL = { fill: 'fill colour', fontColor: 'font colour', font: 'font', alignment: 'alignment', border: 'borders', numFmt: 'number format' };
+
+function dcbTranslateFormula(f, mapRow) {
+  return f.replace(/(\$?)([A-Z]{1,3})(\$?)(\d+)/g, (m, d1, col, d2, row) => d1 + col + d2 + mapRow(parseInt(row, 10)));
+}
+
+function dcbRepairSheet(ws, L, T, items) {
+  const tplWs = T.ws;
+  const M = dcbMakeMapper(L, T);
+  const out = { formulas: [], styles: [], dropdowns: [] };
+  const dsm7 = new Set(items.filter(it => it.dsm && it.dsm.length === 7).map(it => it.r));
+
+  const restoreFormulas = (r, tr, mapRow, isItemRow) => {
+    for (let c = 1; c <= DCB_MAXCOL; c++) {
+      const tc = tplWs.findCell(tr, c);
+      if (!tc) continue;
+      const cell = ws.getCell(r, c);
+      if (tc.type === ExcelJS.ValueType.Formula && tc.formula) {
+        if (cell.type === ExcelJS.ValueType.Formula) continue; // never overwrite an existing formula
+        let f = dcbTranslateFormula(tc.formula, mapRow);
+        if (isItemRow && c === DCB.dsm && dsm7.has(r)) f = f.replace(/,\s*10\)/, ',7)');
+        cell.value = { formula: f };
+        out.formulas.push({ addr: cell.address, formula: '=' + f });
+      } else if (isItemRow && c === 20 && tc.value === 'USD') { // "Local currency" label that every row carries
+        if (cell.value === null || cell.value === undefined || cell.value === '') { cell.value = 'USD'; out.formulas.push({ addr: cell.address, formula: 'USD', label: true }); }
+      }
+    }
+  };
+
+  for (const k of DCB_TPL_KEYS) {
+    const c = M.cur[k], t = T.secs[k];
+    if (!c) continue;
+    for (let r = c.firstRow; r <= c.lastRow; r++) {
+      const tr = M.toTpl(r);
+      restoreFormulas(r, tr, ref => (ref === tr ? r : (M.toCur(ref) ?? ref)), true);
+    }
+    restoreFormulas(c.totalRow, t.total, ref => M.toCur(ref) ?? ref, false);
+  }
+  for (let tr = T.bom; tr <= T.last; tr++) restoreFormulas(L.bomRow + (tr - T.bom), tr, ref => M.toCur(ref) ?? ref, false);
+
+  // Local Transport (summary block) is written by the Open Book engine, not the template:
+  // = SUM of the Api marker column over the whole BOM area.
+  if (L.localRow && M.cur['Fabrics'] && M.cur['Transport Packaging']) {
+    const lc = ws.getCell(L.localRow, DCB.localTransportVal);
+    if (lc.type !== ExcelJS.ValueType.Formula) {
+      const f = `SUM(V${M.cur['Fabrics'].headerRow}:V${M.cur['Transport Packaging'].totalRow})`;
+      lc.value = { formula: f };
+      out.formulas.push({ addr: lc.address, formula: '=' + f });
+    }
+  }
+
+  // styles (ascending row order on purpose - see ExcelJS note in kariban.js)
+  const lastRow = L.bomRow + (T.last - T.bom);
+  for (let r = 1; r <= lastRow; r++) {
+    const tr = M.toTpl(r);
+    if (tr === null) continue;
+    for (let c = 1; c <= DCB_MAXCOL; c++) {
+      const tc = tplWs.findCell(tr, c);
+      if (!tc) continue;
+      const cell = ws.getCell(r, c);
+      const desired = JSON.parse(JSON.stringify(tc.style || {}));
+      const keepRed = c === DCB.supplier && cell.font && cell.font.color && cell.font.color.argb === DCB_RED;
+      if (keepRed) desired.font = Object.assign({}, desired.font, { color: { argb: DCB_RED } });
+      const a = dcbStyleParts(cell.style), b = dcbStyleParts(desired);
+      const diff = Object.keys(a).filter(k => a[k] !== b[k]);
+      if (diff.length) {
+        cell.style = desired;
+        out.styles.push({ addr: cell.address, what: diff.map(k => DCB_PART_LABEL[k]).join(', ') });
+      }
+      // dropdowns (Width Unit / Per unit)
+      if (tc.dataValidation && !cell.dataValidation) {
+        cell.dataValidation = JSON.parse(JSON.stringify(tc.dataValidation));
+        out.dropdowns.push({ addr: cell.address });
+      }
+    }
+  }
+  return out;
 }
 
 /* ============================================================
@@ -625,6 +811,10 @@ function dcbProcessSheet(wb, ws, L, opts) {
     }
   }
 
+  // Template repair: restore missing formulas, revert drifted colours / alignments.
+  let repairs = { formulas: [], styles: [], dropdowns: [] };
+  if (opts.tpl) repairs = dcbRepairSheet(ws, L, opts.tpl, items);
+
   // AFTER
   const eng2 = new DecFormulaEngine(wb);
   const after = dcbSnapshot(eng2, ws, L, items, false);
@@ -650,13 +840,25 @@ function dcbProcessSheet(wb, ws, L, opts) {
     else counts.skipped++;
   }
 
+  // Colour the Unit price cells (whole-style assignment on purpose: assigning .fill alone can bleed
+  // across cells that share a style record in ExcelJS).
+  for (const it of items) {
+    const key = dcbPriceColorKey(it);
+    if (!key) continue;
+    const cell = ws.getCell(it.r, DCB.price);
+    const st = JSON.parse(JSON.stringify(cell.style || {}));
+    st.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: DCB_PRICE_COLORS[key] } };
+    cell.style = st;
+    it.priceColor = key;
+  }
+
   dcbRefreshCachedResults(wb, ws);
 
   const readCell = (r, c) => dcbCellText(ws, r, c).trim();
   return {
     sheetName: name,
     productName: readCell(1, 2), cc: readCell(2, 2), r3: readCell(4, 2),
-    layout: L, items, before, after, counts,
+    layout: L, items, before, after, counts, repairs,
   };
 }
 
@@ -691,6 +893,13 @@ async function dcbRunUpdate(arrayBuffer, opts) {
   await wb.xlsx.load(arrayBuffer);
   const results = [];
   const skippedTabs = [];
+  if (!opts.tpl) {
+    try {
+      const tplWb = new ExcelJS.Workbook();
+      await tplWb.xlsx.load(base64ToArrayBuffer(DECATHLON_TEMPLATE_B64));
+      opts.tpl = dcbTemplateInfo(tplWb.getWorksheet('Format') || tplWb.worksheets[0]);
+    } catch (e) { console.warn('Template repair disabled:', e); opts.tpl = null; }
+  }
   for (const ws of [...wb.worksheets]) {
     const L = dcbAnalyzeSheet(ws);
     if (!L) { skippedTabs.push(ws.name); continue; }
@@ -706,13 +915,11 @@ async function dcbRunUpdate(arrayBuffer, opts) {
 /* ============================================================
    5. CHANGE REPORT (separate workbook)
    ============================================================ */
-const DCB_STATUS_FILL = {
-  'Price updated': 'FFDCFCE7', 'Price added': 'FFD1FAE5', 'Info updated': 'FFFEF3C7',
-  'No change': null, 'Not updated': 'FFFEE2E2',
-};
-function dcbStatusFill(status) {
-  if (status in DCB_STATUS_FILL) return DCB_STATUS_FILL[status];
-  return 'FFE5E7EB'; // any "Skipped – …"
+// Status colours in the report mirror the price-cell colours in the cost sheet
+// (grey = skipped fixed rows that are not an issue).
+function dcbStatusFill(it) {
+  const key = dcbPriceColorKey(it);
+  return key ? DCB_PRICE_COLORS[key] : 'FFE5E7EB';
 }
 
 function dcbBuildReport(run, meta) {
@@ -720,17 +927,53 @@ function dcbBuildReport(run, meta) {
   wb.creator = 'BOM Generator — Decathlon Closed Book';
   const HEAD_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF111827' } };
   const HEAD_FONT = { bold: true, color: { argb: 'FFFFFFFF' } };
+  const TOTAL_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEFF4FF' } };
+  const THIN = { style: 'thin', color: { argb: 'FF9CA3AF' } };
+  const BORDER = { top: THIN, left: THIN, bottom: THIN, right: THIN };
+  const CENTER = { horizontal: 'center', vertical: 'middle', wrapText: true };
   const MONEY = '#,##0.0000';
   const PCT = '0.00%';
 
-  function styleHeader(ws, rowNum, nCols) {
-    const row = ws.getRow(rowNum);
-    for (let c = 1; c <= nCols; c++) {
-      const cell = row.getCell(c);
-      cell.fill = HEAD_FILL; cell.font = HEAD_FONT;
-      cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+  // Writes a value; digit-only text (DSM, item code, CC, tab name ...) becomes a REAL number so
+  // Excel never shows the "number stored as text" warning. Zero-padded number formats keep
+  // leading zeros visible, e.g. 0012345 stays 0012345.
+  function put(ws, r, c, v) {
+    const cell = ws.getCell(r, c);
+    if (v === null || v === undefined || v === '') return cell;
+    if (typeof v === 'string') {
+      const t = v.trim();
+      if (/^\d{1,15}$/.test(t)) { cell.value = Number(t); cell.numFmt = '0'.repeat(t.length); return cell; }
+      if (/^-?\d+\.\d+$/.test(t) && t.length <= 16) { cell.value = Number(t); return cell; }
     }
-    row.height = 30;
+    cell.value = v;
+    return cell;
+  }
+  // borders + alignment on a whole rectangle (empty cells inside a table get borders too)
+  function finishTable(ws, r1, c1, r2, c2, centerCols) {
+    const ctr = new Set(centerCols || []);
+    for (let r = r1; r <= r2; r++) {
+      for (let c = c1; c <= c2; c++) {
+        const cell = ws.getCell(r, c);
+        const v = cell.value;
+        const isNum = typeof v === 'number' || (v && typeof v === 'object' && v.formula !== undefined);
+        cell.border = BORDER;
+        cell.alignment = { vertical: 'middle', horizontal: ctr.has(c) ? 'center' : (isNum ? 'right' : 'left'), wrapText: true };
+      }
+    }
+  }
+  function styleHeader(ws, r, c1, c2, plain) {
+    for (let c = c1; c <= c2; c++) {
+      const cell = ws.getCell(r, c);
+      if (!plain) { cell.fill = HEAD_FILL; cell.font = HEAD_FONT; } else { cell.font = { bold: true }; }
+      cell.alignment = CENTER; cell.border = BORDER;
+    }
+    ws.getRow(r).height = 30;
+  }
+  function mergeTabBlock(ws, r1, r2) {
+    if (r2 > r1) ws.mergeCells(r1, 1, r2, 1);
+    for (let r = r1; r <= r2; r++) ws.getCell(r, 1).border = BORDER;
+    const c = ws.getCell(r1, 1);
+    c.alignment = CENTER; c.font = { bold: true };
   }
   // before / after / diff / diff% — diff cells are live formulas (with cached results)
   function putDelta(ws, r, cBefore, cAfter, cDiff, cPct, b, a) {
@@ -753,18 +996,6 @@ function dcbBuildReport(run, meta) {
     { label: 'VENDOR PRICE', get: sn => sn.vendor, kind: 'total' },
   ];
 
-  const THIN = { style: 'thin', color: { argb: 'FFBFC5CE' } };
-  const BORDER = { top: THIN, left: THIN, bottom: THIN, right: THIN };
-  const CENTER = { horizontal: 'center', vertical: 'middle', wrapText: true };
-  const TOTAL_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEFF4FF' } };
-  // merge the Tab cell down each tab's block, centered
-  function mergeTabBlock(ws, r1, r2) {
-    if (r2 > r1) ws.mergeCells(r1, 1, r2, 1);
-    const c = ws.getCell(r1, 1);
-    c.alignment = CENTER; c.font = { bold: true };
-    for (let r = r1; r <= r2; r++) ws.getCell(r, 1).border = BORDER;
-  }
-
   /* ---------- Summary ---------- */
   const ws1 = wb.addWorksheet('Summary');
   ws1.getCell('A1').value = 'Decathlon Price Update — Change Report';
@@ -775,63 +1006,61 @@ function dcbBuildReport(run, meta) {
     ['Fabric price list', meta.fabricInfo],
     ['Accessories price list', meta.accInfo],
     ['All amounts', 'USD price. Δ = After − Before.'],
+    ['Price cell colours (cost sheet, Unit price)', 'Green = price changed | Pink = same as previous | Red = issue (previous price kept)'],
   ];
-  info.forEach((p, i) => {
-    ws1.getCell(3 + i, 1).value = p[0]; ws1.getCell(3 + i, 1).font = { bold: true };
-    ws1.getCell(3 + i, 2).value = p[1];
-  });
-  const hr = 3 + info.length + 1;            // group-header row; sub-header = hr + 1
+  info.forEach((p, i) => { put(ws1, 3 + i, 1, p[0]); put(ws1, 3 + i, 2, p[1]); ws1.getCell(3 + i, 1).font = { bold: true }; });
+  finishTable(ws1, 3, 1, 3 + info.length - 1, 2);
+  info.forEach((p, i) => { ws1.getCell(3 + i, 1).font = { bold: true }; });
+  ws1.getColumn(1).width = 30; ws1.getColumn(2).width = 40; ws1.getColumn(3).width = 12;
+
+  const hr = 3 + info.length + 1;               // group-header row; sub-header = hr + 1
   const GROUPS = [
-    { title: 'Total BOM cost',   get: sn => sn.bom, key: true },
-    { title: 'Total CM price',   get: sn => sn.cm },
-    { title: 'Total other costs', get: sn => sn.other },
-    { title: 'EXW price',        get: sn => sn.exw },
-    { title: 'VENDOR PRICE',     get: sn => sn.vendor, key: true },
+    { title: 'Total BOM cost', get: sn => sn.bom, key: true },
+    { title: 'Total CM price', get: sn => sn.cm },
+    { title: 'VENDOR PRICE',   get: sn => sn.vendor, key: true },
   ];
-  ['Tab', 'Product', 'CC'].forEach((h, i) => {
-    ws1.getCell(hr, i + 1).value = h;
-    ws1.mergeCells(hr, i + 1, hr + 1, i + 1);
-  });
+  const nSumCols = 3 + GROUPS.length * 4;
+  ['Tab', 'Product', 'CC'].forEach((h, i) => { ws1.getCell(hr, i + 1).value = h; });
   GROUPS.forEach((g, gi) => {
     const c0 = 4 + gi * 4;
     ws1.getCell(hr, c0).value = g.title;
-    ws1.mergeCells(hr, c0, hr, c0 + 3);
     ['Before', 'After', 'Δ', 'Δ %'].forEach((h, k) => { ws1.getCell(hr + 1, c0 + k).value = h; });
   });
-  const nSumCols = 3 + GROUPS.length * 4;
-  styleHeader(ws1, hr, nSumCols); styleHeader(ws1, hr + 1, nSumCols);
   run.results.forEach((s, i) => {
     const r = hr + 2 + i;
-    [s.sheetName, s.productName, s.cc].forEach((v, j) => { ws1.getCell(r, j + 1).value = v; ws1.getCell(r, j + 1).alignment = { vertical: 'middle', horizontal: j === 0 ? 'center' : 'left', wrapText: true }; });
+    put(ws1, r, 1, s.sheetName); put(ws1, r, 2, s.productName); put(ws1, r, 3, s.cc);
     GROUPS.forEach((g, gi) => {
       const c0 = 4 + gi * 4;
       const bv = g.get(s.before), av = g.get(s.after);
       ws1.getCell(r, c0).value = bv; ws1.getCell(r, c0 + 1).value = av;
       ws1.getCell(r, c0).numFmt = MONEY; ws1.getCell(r, c0 + 1).numFmt = MONEY;
       putDelta(ws1, r, c0, c0 + 1, c0 + 2, c0 + 3, bv, av);
-      if (g.key) for (let k = 0; k < 4; k++) ws1.getCell(r, c0 + k).fill = TOTAL_FILL;
     });
-    for (let c = 1; c <= nSumCols; c++) ws1.getCell(r, c).border = BORDER;
   });
   const lastSum = hr + 1 + run.results.length;
+  finishTable(ws1, hr, 1, lastSum, nSumCols, [1, 3]);
+  // coloured key groups (Total BOM cost, VENDOR PRICE)
+  run.results.forEach((s, i) => {
+    GROUPS.forEach((g, gi) => {
+      if (!g.key) return;
+      for (let k = 0; k < 4; k++) ws1.getCell(hr + 2 + i, 4 + gi * 4 + k).fill = TOTAL_FILL;
+    });
+  });
+  ['Tab', 'Product', 'CC'].forEach((h, i) => { ws1.mergeCells(hr, i + 1, hr + 1, i + 1); });
+  GROUPS.forEach((g, gi) => { ws1.mergeCells(hr, 4 + gi * 4, hr, 7 + gi * 4); });
+  styleHeader(ws1, hr, 1, nSumCols); styleHeader(ws1, hr + 1, 1, nSumCols);
+  for (let c = 4; c <= nSumCols; c++) ws1.getColumn(c).width = ((c - 4) % 4 >= 2) ? 13 : 16;
   if (run.skippedTabs.length) {
     ws1.getCell(lastSum + 2, 1).value = 'Tabs not treated as cost sheets (left untouched):';
     ws1.getCell(lastSum + 2, 1).font = { bold: true };
     ws1.getCell(lastSum + 2, 2).value = run.skippedTabs.join(', ');
   }
-  ws1.getColumn(1).width = 30; ws1.getColumn(2).width = 28; ws1.getColumn(3).width = 12;
-  for (let c = 4; c <= nSumCols; c++) ws1.getColumn(c).width = ((c - 4) % 4 >= 2) ? 13 : 16;
-  ws1.views = [{ state: 'frozen', ySplit: hr + 1, xSplit: 3 }];
 
   /* ---------- Section Costs ---------- */
   const ws2 = wb.addWorksheet('Section Costs');
-  const h2 = ['Tab', 'Line', 'Before (USD)', 'After (USD)', 'Δ (USD)', 'Δ %'];
-  h2.forEach((h, i) => {
-    const c = ws2.getCell(1, i + 1);
-    c.value = h; c.font = { bold: true }; c.alignment = CENTER; c.border = BORDER;
-  });
-  ws2.getRow(1).height = 24;
+  ['Tab', 'Line', 'Before (USD)', 'After (USD)', 'Δ (USD)', 'Δ %'].forEach((h, i) => { ws2.getCell(1, i + 1).value = h; });
   let r2 = 2;
+  const tabBlocks2 = [];
   for (const s of run.results) {
     const blockStart = r2;
     for (const ln of lineDefs(s)) {
@@ -840,19 +1069,22 @@ function dcbBuildReport(run, meta) {
       ws2.getCell(r2, 3).value = b; ws2.getCell(r2, 4).value = a;
       ws2.getCell(r2, 3).numFmt = MONEY; ws2.getCell(r2, 4).numFmt = MONEY;
       putDelta(ws2, r2, 3, 4, 5, 6, b, a);
-      for (let c = 2; c <= 6; c++) {
-        const cell = ws2.getCell(r2, c);
-        cell.border = BORDER;
-        cell.alignment = { vertical: 'middle', horizontal: c === 2 ? 'left' : 'right' };
-        if (ln.kind === 'total') { cell.font = { bold: true }; cell.fill = TOTAL_FILL; }   // only Total BOM cost & VENDOR PRICE are coloured
-      }
+      ln._row = r2; ln._kind = ln.kind;
       r2++;
     }
-    ws2.getCell(blockStart, 1).value = s.sheetName;
-    mergeTabBlock(ws2, blockStart, r2 - 1);
+    tabBlocks2.push({ s, blockStart, blockEnd: r2 - 1, lines: lineDefs(s).map((ln, i) => ({ kind: ln.kind, row: blockStart + i })) });
   }
+  finishTable(ws2, 1, 1, r2 - 1, 6);
+  for (const tb of tabBlocks2) {
+    for (const ln of tb.lines) {
+      if (ln.kind !== 'total') continue; // only Total BOM cost & VENDOR PRICE are coloured
+      for (let c = 2; c <= 6; c++) { const cell = ws2.getCell(ln.row, c); cell.fill = TOTAL_FILL; cell.font = { bold: true }; }
+    }
+    put(ws2, tb.blockStart, 1, tb.s.sheetName);
+    mergeTabBlock(ws2, tb.blockStart, tb.blockEnd);
+  }
+  styleHeader(ws2, 1, 1, 6, true);
   [26, 36, 18, 18, 16, 12].forEach((w, i) => { ws2.getColumn(i + 1).width = w; });
-  ws2.views = [{ state: 'frozen', ySplit: 1 }];
 
   /* ---------- Item Changes ---------- */
   const ws3 = wb.addWorksheet('Item Changes');
@@ -860,15 +1092,15 @@ function dcbBuildReport(run, meta) {
     'Old supplier', 'New supplier', 'Old usable width', 'New usable width',
     'Row cost before (USD)', 'Row cost after (USD)', 'Cost impact (USD)', 'Status', 'Remark'];
   h3.forEach((h, i) => { ws3.getCell(1, i + 1).value = h; });
-  styleHeader(ws3, 1, h3.length);
   let r3 = 2;
+  const tabBlocks3 = [];
   for (const s of run.results) {
     const blockStart = r3;
     for (const it of s.items) {
       const vals = [null, it.sec.label, it.r, it.part, it.des, it.dsm, it.itemCode, it.old.price, it.new.price, null, null,
         it.old.supplier, it.new.supplier, it.old.width, it.new.width,
         it.costBefore, it.costAfter, null, it.status, it.remark || ''];
-      vals.forEach((v, j) => { if (v !== null && v !== undefined && v !== '') ws3.getCell(r3, j + 1).value = v; });
+      vals.forEach((v, j) => { put(ws3, r3, j + 1, v); });
       ['H', 'I', 'J'].forEach(L => { ws3.getCell(`${L}${r3}`).numFmt = '0.0000'; });
       ws3.getCell(r3, 11).numFmt = PCT;
       [16, 17, 18].forEach(n => { ws3.getCell(r3, n).numFmt = MONEY; });
@@ -879,41 +1111,65 @@ function dcbBuildReport(run, meta) {
       if (typeof it.costBefore === 'number' && typeof it.costAfter === 'number') {
         ws3.getCell(r3, 18).value = { formula: `Q${r3}-P${r3}`, result: it.costAfter - it.costBefore };
       }
-      const fill = dcbStatusFill(it.status);
-      if (fill) ws3.getCell(r3, 19).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: fill } };
       r3++;
     }
-    if (r3 > blockStart) { ws3.getCell(blockStart, 1).value = s.sheetName; mergeTabBlock(ws3, blockStart, r3 - 1); }
+    tabBlocks3.push({ s, blockStart, blockEnd: r3 - 1 });
   }
+  finishTable(ws3, 1, 1, Math.max(r3 - 1, 1), h3.length, [3, 19]);
+  for (const tb of tabBlocks3) {
+    tb.s.items.forEach((it, i) => {
+      const fill = dcbStatusFill(it);
+      if (fill) ws3.getCell(tb.blockStart + i, 19).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: fill } };
+    });
+    if (tb.blockEnd >= tb.blockStart) { put(ws3, tb.blockStart, 1, tb.s.sheetName); mergeTabBlock(ws3, tb.blockStart, tb.blockEnd); }
+  }
+  styleHeader(ws3, 1, 1, h3.length);
   [24, 18, 7, 22, 52, 13, 14, 11, 11, 11, 10, 20, 20, 16, 16, 16, 16, 16, 24, 60].forEach((w, i) => { ws3.getColumn(i + 1).width = w; });
-  ws3.views = [{ state: 'frozen', ySplit: 1, xSplit: 5 }];
   ws3.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: h3.length } };
 
   /* ---------- Needs Attention ---------- */
   const ws4 = wb.addWorksheet('Needs Attention');
   const h4 = ['Tab', 'Section', 'Row', 'Type', 'Designation', 'DSM', 'Item code (last 7)', 'Issue', 'Price kept in sheet', 'Supplier cell now reads'];
   h4.forEach((h, i) => { ws4.getCell(1, i + 1).value = h; });
-  styleHeader(ws4, 1, h4.length);
   let r4 = 2;
-  // Packaging sections commonly hold fixed template rows (no DSM) - not an issue.
-  const QUIET = new Set(['Sales Packaging', 'Transport Packaging']);
+  const issueFills = [];
   for (const s of run.results) {
     for (const it of s.items) {
-      const isIssue = it.kind === 'fail'
-        || (it.kind === 'skip' && !(it.status === 'Skipped – no DSM' && QUIET.has(it.sec.name)));
-      if (!isIssue) continue;
-      [s.sheetName, it.sec.label, it.r, it.part, it.des, it.dsm, it.itemCode, it.remark || it.status, it.old.price, it.old.supplier].forEach((v, j) => {
-        if (v !== null && v !== undefined && v !== '') ws4.getCell(r4, j + 1).value = v;
-      });
+      if (!dcbIsIssue(it)) continue;
+      [s.sheetName, it.sec.label, it.r, it.part, it.des, it.dsm, it.itemCode, it.remark || it.status, it.old.price, it.old.supplier].forEach((v, j) => { put(ws4, r4, j + 1, v); });
       ws4.getCell(r4, 9).numFmt = '0.0000';
-      ws4.getCell(r4, 8).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: it.kind === 'fail' ? 'FFFEE2E2' : 'FFE5E7EB' } };
+      issueFills.push([r4, DCB_PRICE_COLORS.issue]);
       r4++;
     }
   }
-  if (r4 === 2) { ws4.getCell(2, 1).value = 'Nothing needs attention — every priced row was resolved.'; }
+  if (r4 === 2) { ws4.getCell(2, 1).value = 'Nothing needs attention — every priced row was resolved.'; r4 = 3; }
+  finishTable(ws4, 1, 1, r4 - 1, h4.length, [3]);
+  issueFills.forEach(([r, argb]) => { ws4.getCell(r, 8).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb } }; });
+  styleHeader(ws4, 1, 1, h4.length);
   [24, 18, 7, 22, 52, 13, 14, 70, 14, 40].forEach((w, i) => { ws4.getColumn(i + 1).width = w; });
-  ws4.views = [{ state: 'frozen', ySplit: 1 }];
-  if (r4 > 2) ws4.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: h4.length } };
+  if (r4 > 3 || ws4.getCell(2, 1).value !== 'Nothing needs attention — every priced row was resolved.') ws4.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: h4.length } };
+
+  /* ---------- Repairs (template restore) ---------- */
+  const ws5 = wb.addWorksheet('Repairs');
+  const h5 = ['Tab', 'Type', 'Cell', 'Detail'];
+  h5.forEach((h, i) => { ws5.getCell(1, i + 1).value = h; });
+  let r5 = 2;
+  const STYLE_CAP = 400;
+  const tabBlocks5 = [];
+  for (const s of run.results) {
+    const blockStart = r5;
+    const rp = s.repairs || { formulas: [], styles: [], dropdowns: [] };
+    rp.formulas.forEach(x => { put(ws5, r5, 2, x.label ? 'Label restored' : 'Formula restored'); put(ws5, r5, 3, x.addr); put(ws5, r5, 4, x.formula); r5++; });
+    rp.dropdowns.forEach(x => { put(ws5, r5, 2, 'Dropdown restored'); put(ws5, r5, 3, x.addr); put(ws5, r5, 4, 'Width unit / Per unit list'); r5++; });
+    rp.styles.slice(0, STYLE_CAP).forEach(x => { put(ws5, r5, 2, 'Format reverted to template'); put(ws5, r5, 3, x.addr); put(ws5, r5, 4, x.what); r5++; });
+    if (rp.styles.length > STYLE_CAP) { put(ws5, r5, 2, 'Format reverted to template'); put(ws5, r5, 3, '…'); put(ws5, r5, 4, `${rp.styles.length - STYLE_CAP} more cells`); r5++; }
+    if (r5 === blockStart) { put(ws5, r5, 2, 'No repair needed'); put(ws5, r5, 4, 'Formulas and formatting already matched the template.'); r5++; }
+    tabBlocks5.push({ s, blockStart, blockEnd: r5 - 1 });
+  }
+  finishTable(ws5, 1, 1, r5 - 1, 4, [3]);
+  for (const tb of tabBlocks5) { put(ws5, tb.blockStart, 1, tb.s.sheetName); mergeTabBlock(ws5, tb.blockStart, tb.blockEnd); }
+  styleHeader(ws5, 1, 1, 4);
+  [24, 28, 12, 90].forEach((w, i) => { ws5.getColumn(i + 1).width = w; });
 
   return wb;
 }
