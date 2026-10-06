@@ -603,7 +603,7 @@ function dcbParseDesignation(des, dsmHint) {
   return { dsm, itemCode };
 }
 
-function dcbApplyPricing(ws, r, pricing, unitHint) {
+function dcbApplyPricing(ws, r, pricing, unitHint, skipWidth) {
   ws.getCell(r, DCB.price).value = pricing.unitPrice;
 
   const supCell = ws.getCell(r, DCB.supplier);
@@ -620,7 +620,7 @@ function dcbApplyPricing(ws, r, pricing, unitHint) {
   // Model code column stays blank here; the (red) comment is written after template repair.
   ws.getCell(r, DCB.model).value = null;
 
-  if (pricing.usableWidth !== undefined) {
+  if (pricing.usableWidth !== undefined && !skipWidth) {
     if (!pricing.usableWidth) { ws.getCell(r, DCB.width).value = null; ws.getCell(r, DCB.widthUnit).value = null; }
     else dcbNormalizeWidth(ws, r, pricing.usableWidth, unitHint);
   }
@@ -875,7 +875,7 @@ function dcbProcessSheet(wb, ws, L, opts) {
     if (mk.value !== null && mk.value !== undefined && mk.type !== ExcelJS.ValueType.Formula) mk.value = null;
     // width unit moves into the usable-width cell
     it.unitHint = dcbWidthUnitHint(ws, r);
-    dcbNormalizeWidth(ws, r, undefined, it.unitHint);
+    if (sec.name !== 'Sales Packaging') dcbNormalizeWidth(ws, r, undefined, it.unitHint);
     // DSM code column: restore the formula if it is missing
     if (dsm && ws.getCell(r, DCB.dsm).type !== ExcelJS.ValueType.Formula) {
       ws.getCell(r, DCB.dsm).value = { formula: `LEFT(B${r},${dsm.length === 7 ? 7 : 10})` };
@@ -903,7 +903,7 @@ function dcbProcessSheet(wb, ws, L, opts) {
     }
 
     if (it.kind === 'ok') {
-      dcbApplyPricing(ws, r, pricing, it.unitHint);
+      dcbApplyPricing(ws, r, pricing, it.unitHint, sec.name === 'Sales Packaging');
       it.pricing = pricing;
       it.remark = flat ? 'Flat rate' : (pricing.apiMarkerText ? 'Fabric price, region ' + pricing.apiMarkerText : (pricing.needsApiMarker ? 'Api marker +15% (non-Bangladesh origin)' : ''));
       if (pricing.highestPriceTaken) it.remark += (it.remark ? '; ' : '') + 'Highest price taken (Item code not matched)';
@@ -1020,6 +1020,9 @@ async function dcbRunUpdate(arrayBuffer, opts) {
       await tplWb.xlsx.load(base64ToArrayBuffer(DECATHLON_TEMPLATE_B64));
       opts.tpl = dcbTemplateInfo(tplWb.getWorksheet('Format') || tplWb.worksheets[0]);
     } catch (e) { console.warn('Template repair disabled:', e); opts.tpl = null; }
+  }
+  for (const ws of wb.worksheets) {
+    ws.views = (ws.views || []).map(v => { const { state, xSplit, ySplit, topLeftCell, activePane, pane, ...rest } = v; return rest; });
   }
   for (const ws of [...wb.worksheets]) {
     const L = dcbAnalyzeSheet(ws);
@@ -1163,6 +1166,7 @@ function dcbBuildReport(run, meta) {
   });
   const lastSum = hr + 1 + run.results.length;
   finishTable(ws1, hr, 1, lastSum, nSumCols, [1, 3]);
+  for (let r = hr + 2; r <= lastSum; r++) [4, 5, 6, 8, 9, 10].forEach(c => { ws1.getCell(r, c).numFmt = DCB_ACCT4; });
   // coloured key groups (Total BOM cost, VENDOR PRICE)
   run.results.forEach((s, i) => {
     GROUPS.forEach((g, gi) => {
@@ -1194,6 +1198,7 @@ function dcbBuildReport(run, meta) {
     tabBlocks2.push({ s, blockStart, blockEnd: r2 - 1, lines: lineDefs(s).map((ln, i) => ({ kind: ln.kind, row: blockStart + i })) });
   }
   finishTable(ws2, 1, 1, r2 - 1, 6);
+  for (let r = 2; r < r2; r++) [3, 4, 5].forEach(c => { ws2.getCell(r, c).numFmt = DCB_ACCT4; });
   for (const tb of tabBlocks2) {
     for (const ln of tb.lines) {
       if (ln.kind !== 'total') continue; // only Total BOM cost & VENDOR PRICE are coloured
