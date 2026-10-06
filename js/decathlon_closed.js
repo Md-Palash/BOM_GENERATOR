@@ -406,8 +406,68 @@ const DCB_SECTION_DEFS = [
   { re: /^transport packaging$/i, name: 'Transport Packaging', label: 'Transport Packaging' },
 ];
 // Column numbers in the Decathlon cost sheet
-const DCB = { type: 1, desig: 2, dsm: 3, model: 4, supplier: 6, width: 7, price: 9, usd: 21, localSum: 19, marker: 22, summaryUsd: 12, localTransportVal: 9 };
+const DCB = { type: 1, desig: 2, dsm: 3, model: 4, supplier: 6, width: 7, widthUnit: 8, price: 9, usd: 21, localSum: 19, marker: 22, summaryUsd: 12, localTransportVal: 9 };
 const DCB_MAXCOL = 27;
+// Accounting number formats (unit price needs 5 decimals so flat rates like 0.00054 stay visible)
+const DCB_ACCT5 = '_($* #,##0.00000_);_($* (#,##0.00000);_($* "-"?????_);_(@_)';
+const DCB_ACCT4 = '_($* #,##0.0000_);_($* (#,##0.0000);_($* "-"????_);_(@_)';
+const DCB_NUMERIC_TEXT_RE = /^\s*-?\d+(\.\d+)?\s*$/;
+
+function dcbSectionRowSet(L) {
+  const set = new Set();
+  for (const s of L.sections) for (let r = s.firstRow; r <= s.lastRow; r++) set.add(r);
+  return set;
+}
+
+// Usable width + unit are kept together in ONE cell ("140 cm"); the Width unit column stays blank.
+function dcbWidthUnitHint(ws, r) {
+  const g = dcbCellText(ws, r, DCB.width).trim();
+  const h = dcbCellText(ws, r, DCB.widthUnit).trim();
+  if (h) return h;
+  const m = g.match(/[A-Za-z]+/);
+  return m ? m[0] : '';
+}
+function dcbCombinedWidth(g, h) {
+  g = (g || '').trim(); h = (h || '').trim();
+  return (g && h && !/[A-Za-z]/.test(g)) ? `${g} ${h}` : g;
+}
+function dcbNormalizeWidth(ws, r, newWidth, unitHint) {
+  const gCell = ws.getCell(r, DCB.width);
+  let w = (newWidth !== undefined && newWidth !== null && String(newWidth).trim() !== '') ? String(newWidth).trim() : dcbCellText(ws, r, DCB.width).trim();
+  if (w && !/[A-Za-z]/.test(w)) {
+    const unit = unitHint || (newWidth !== undefined && newWidth !== null && newWidth !== '' ? 'cm' : '');
+    if (unit) w = `${w} ${unit}`;
+  }
+  if (w) gCell.value = w;
+  ws.getCell(r, DCB.widthUnit).value = null;
+}
+
+// Excel flags "inconsistent formula" (LEFT(B,7) vs LEFT(B,10) etc.) and similar benign hints. Real errors
+// (#VALUE!, #DIV/0! ...) are NOT suppressed. Needs JSZip (loaded on demand).
+function dcbLoadJSZip() {
+  if (window.JSZip) return Promise.resolve(window.JSZip);
+  return new Promise((res, rej) => {
+    const sc = document.createElement('script');
+    sc.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+    sc.onload = () => res(window.JSZip);
+    sc.onerror = () => rej(new Error('JSZip failed to load'));
+    document.head.appendChild(sc);
+  });
+}
+async function dcbInjectIgnoredErrors(buffer, maxRow) {
+  const JSZip = await dcbLoadJSZip();
+  const zip = await JSZip.loadAsync(buffer);
+  const tag = `<ignoredErrors><ignoredError sqref="A1:AB${maxRow}" formula="1" formulaRange="1" numberStoredAsText="1" unlockedFormula="1"/></ignoredErrors>`;
+  for (const name of Object.keys(zip.files)) {
+    if (!/^xl\/worksheets\/sheet\d+\.xml$/.test(name)) continue;
+    let xml = await zip.file(name).async('string');
+    if (xml.includes('<ignoredErrors')) continue;
+    const m = xml.match(/<(smartTags|drawing|legacyDrawing|legacyDrawingHF|picture|oleObjects|controls|webPublishItems|tableParts|extLst)[\s>\/]/);
+    xml = m ? xml.slice(0, m.index) + tag + xml.slice(m.index) : xml.replace('</worksheet>', tag + '</worksheet>');
+    zip.file(name, xml);
+  }
+  return zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE' });
+}
 
 function dcbCellText(ws, r, c) {
   const cell = ws.findCell(r, c);
@@ -543,7 +603,7 @@ function dcbParseDesignation(des, dsmHint) {
   return { dsm, itemCode };
 }
 
-function dcbApplyPricing(ws, r, pricing) {
+function dcbApplyPricing(ws, r, pricing, unitHint) {
   ws.getCell(r, DCB.price).value = pricing.unitPrice;
 
   const supCell = ws.getCell(r, DCB.supplier);
@@ -553,16 +613,17 @@ function dcbApplyPricing(ws, r, pricing) {
     supCell.style = Object.assign({}, supCell.style, { font: Object.assign({}, supCell.font, DECATHLON_DEFAULT_FONT) });
   }
 
+  // Api marker column: formula only - never text comments.
   const vCell = ws.getCell(r, DCB.marker);
-  if (pricing.needsApiMarker) vCell.value = { formula: `S${r}*0.15` };
-  else if (pricing.apiMarkerText) vCell.value = pricing.apiMarkerText;
-  else vCell.value = null;
+  vCell.value = pricing.needsApiMarker ? { formula: `S${r}*0.15` } : null;
 
-  const dCell = ws.getCell(r, DCB.model);
-  if (pricing.highestPriceTaken) dCell.value = 'Highest price taken';
-  else if (dcbCellText(ws, r, DCB.model) === 'Highest price taken') dCell.value = null;
+  // Model code column stays blank here; the (red) comment is written after template repair.
+  ws.getCell(r, DCB.model).value = null;
 
-  if (pricing.usableWidth !== undefined) ws.getCell(r, DCB.width).value = pricing.usableWidth || null;
+  if (pricing.usableWidth !== undefined) {
+    if (!pricing.usableWidth) { ws.getCell(r, DCB.width).value = null; ws.getCell(r, DCB.widthUnit).value = null; }
+    else dcbNormalizeWidth(ws, r, pricing.usableWidth, unitHint);
+  }
 }
 
 /* ============================================================
@@ -671,6 +732,7 @@ function dcbRepairSheet(ws, L, T, items) {
   const M = dcbMakeMapper(L, T);
   const out = { formulas: [], styles: [], dropdowns: [] };
   const dsm7 = new Set(items.filter(it => it.dsm && it.dsm.length === 7).map(it => it.r));
+  const secRows = dcbSectionRowSet(L);
 
   const restoreFormulas = (r, tr, mapRow, isItemRow) => {
     for (let c = 1; c <= DCB_MAXCOL; c++) {
@@ -737,6 +799,7 @@ function dcbRepairSheet(ws, L, T, items) {
       const desired = JSON.parse(JSON.stringify(tc.style || {}));
       const keepRed = c === DCB.supplier && cell.font && cell.font.color && cell.font.color.argb === DCB_RED;
       if (keepRed) desired.font = Object.assign({}, desired.font, { color: { argb: DCB_RED } });
+      if (c === DCB.price && secRows.has(r)) desired.numFmt = DCB_ACCT5;
       const a = dcbStyleParts(cell.style), b = dcbStyleParts(desired);
       const diff = Object.keys(a).filter(k => a[k] !== b[k]);
       if (diff.length) {
@@ -780,7 +843,7 @@ function dcbProcessSheet(wb, ws, L, opts) {
     it.old = {
       price: p,
       supplier: dcbCellText(ws, it.r, DCB.supplier).trim(),
-      width: dcbCellText(ws, it.r, DCB.width).trim(),
+      width: dcbCombinedWidth(dcbCellText(ws, it.r, DCB.width), dcbCellText(ws, it.r, DCB.widthUnit)),
       marker: dcbMarkerString(ws, it.r),
     };
   }
@@ -799,6 +862,24 @@ function dcbProcessSheet(wb, ws, L, opts) {
     // (e.g. interlining detection) still see the full text.
     const row = { part, dsm, model: '', component: des, itemCode, gridValue: '', items: '', qty: '', unit: '', comments: '' };
     it.part = part; it.dsm = dsm; it.itemCode = itemCode;
+
+    // --- clean-up of every item row ---
+    // numbers stored as text -> real numbers
+    for (const c of [9, 10, 11, 12, 14, 17, 18]) {
+      const cc = ws.getCell(r, c);
+      if (typeof cc.value === 'string' && DCB_NUMERIC_TEXT_RE.test(cc.value)) cc.value = parseFloat(cc.value);
+    }
+    // Model code column: always blank (no formula); Api marker: remove old text comments (formulas stay)
+    ws.getCell(r, DCB.model).value = null;
+    const mk = ws.getCell(r, DCB.marker);
+    if (mk.value !== null && mk.value !== undefined && mk.type !== ExcelJS.ValueType.Formula) mk.value = null;
+    // width unit moves into the usable-width cell
+    it.unitHint = dcbWidthUnitHint(ws, r);
+    dcbNormalizeWidth(ws, r, undefined, it.unitHint);
+    // DSM code column: restore the formula if it is missing
+    if (dsm && ws.getCell(r, DCB.dsm).type !== ExcelJS.ValueType.Formula) {
+      ws.getCell(r, DCB.dsm).value = { formula: `LEFT(B${r},${dsm.length === 7 ? 7 : 10})` };
+    }
 
     const fabricStyle = sec.name === 'Fabrics' && !decathlonIsInterlining(row);
     const flat = fabricStyle ? null : decathlonFlatRateFor(row);
@@ -822,7 +903,7 @@ function dcbProcessSheet(wb, ws, L, opts) {
     }
 
     if (it.kind === 'ok') {
-      dcbApplyPricing(ws, r, pricing);
+      dcbApplyPricing(ws, r, pricing, it.unitHint);
       it.pricing = pricing;
       it.remark = flat ? 'Flat rate' : (pricing.apiMarkerText ? 'Fabric price, region ' + pricing.apiMarkerText : (pricing.needsApiMarker ? 'Api marker +15% (non-Bangladesh origin)' : ''));
       if (pricing.highestPriceTaken) it.remark += (it.remark ? '; ' : '') + 'Highest price taken (Item code not matched)';
@@ -832,6 +913,28 @@ function dcbProcessSheet(wb, ws, L, opts) {
   // Template repair: restore missing formulas, revert drifted colours / alignments.
   let repairs = { formulas: [], styles: [], dropdowns: [] };
   if (opts.tpl) repairs = dcbRepairSheet(ws, L, opts.tpl, items);
+
+  // --- final formatting (after template repair so it is not reverted) ---
+  const secRowsF = dcbSectionRowSet(L);
+  for (const r of secRowsF) {
+    const pc = ws.getCell(r, DCB.price);
+    pc.style = Object.assign({}, pc.style, { numFmt: DCB_ACCT5 });
+  }
+  for (const it of items) {
+    if (it.kind === 'ok' && it.pricing && it.pricing.highestPriceTaken) {
+      const dc = ws.getCell(it.r, DCB.model);
+      dc.value = 'Highest price taken';
+      dc.style = Object.assign({}, dc.style, { font: Object.assign({}, dc.font, DECATHLON_RED_FONT) });
+    }
+  }
+  for (let r = 1; r <= 6; r++) {
+    const bc = ws.getCell(r, 2);
+    bc.style = Object.assign({}, bc.style, { alignment: Object.assign({}, bc.alignment, { horizontal: 'center', vertical: 'middle' }) });
+  }
+  for (const a of ['B2', 'B4']) {
+    const bc = ws.getCell(a);
+    if (typeof bc.value === 'string' && DCB_NUMERIC_TEXT_RE.test(bc.value)) bc.value = parseFloat(bc.value);
+  }
 
   // AFTER
   const eng2 = new DecFormulaEngine(wb);
@@ -926,7 +1029,11 @@ async function dcbRunUpdate(arrayBuffer, opts) {
   }
   if (!results.length) throw new Error('No Decathlon cost-sheet tabs were recognised in this workbook (looked for FABRICS … Total bom cost).');
   wb.calcProperties = Object.assign({}, wb.calcProperties, { fullCalcOnLoad: true });
-  const buffer = await wb.xlsx.writeBuffer();
+  let buffer = await wb.xlsx.writeBuffer();
+  try {
+    const maxRow = Math.max(...wb.worksheets.map(w => w.rowCount)) + 5;
+    buffer = await dcbInjectIgnoredErrors(buffer, maxRow);
+  } catch (e) { console.warn('Could not add ignoredErrors (Excel hints stay visible):', e); }
   return { buffer, results, skippedTabs };
 }
 
@@ -1034,7 +1141,6 @@ function dcbBuildReport(run, meta) {
   const hr = 3 + info.length + 1;               // group-header row; sub-header = hr + 1
   const GROUPS = [
     { title: 'Total BOM cost', get: sn => sn.bom, key: true },
-    { title: 'Total CM price', get: sn => sn.cm },
     { title: 'VENDOR PRICE',   get: sn => sn.vendor, key: true },
   ];
   const nSumCols = 3 + GROUPS.length * 4;
@@ -1068,11 +1174,6 @@ function dcbBuildReport(run, meta) {
   GROUPS.forEach((g, gi) => { ws1.mergeCells(hr, 4 + gi * 4, hr, 7 + gi * 4); });
   styleHeader(ws1, hr, 1, nSumCols); styleHeader(ws1, hr + 1, 1, nSumCols);
   for (let c = 4; c <= nSumCols; c++) ws1.getColumn(c).width = ((c - 4) % 4 >= 2) ? 13 : 16;
-  if (run.skippedTabs.length) {
-    ws1.getCell(lastSum + 2, 1).value = 'Tabs not treated as cost sheets (left untouched):';
-    ws1.getCell(lastSum + 2, 1).font = { bold: true };
-    ws1.getCell(lastSum + 2, 2).value = run.skippedTabs.join(', ');
-  }
 
   /* ---------- Section Costs ---------- */
   const ws2 = wb.addWorksheet('Section Costs');
@@ -1119,9 +1220,9 @@ function dcbBuildReport(run, meta) {
         it.old.supplier, it.new.supplier, it.old.width, it.new.width,
         it.costBefore, it.costAfter, null, it.status, it.remark || ''];
       vals.forEach((v, j) => { put(ws3, r3, j + 1, v); });
-      ['H', 'I', 'J'].forEach(L => { ws3.getCell(`${L}${r3}`).numFmt = '0.0000'; });
+      [8, 9, 10].forEach(n => { ws3.getCell(r3, n).numFmt = DCB_ACCT5; });
       ws3.getCell(r3, 11).numFmt = PCT;
-      [16, 17, 18].forEach(n => { ws3.getCell(r3, n).numFmt = MONEY; });
+      [16, 17, 18].forEach(n => { ws3.getCell(r3, n).numFmt = DCB_ACCT4; });
       if (typeof it.old.price === 'number' && typeof it.new.price === 'number') {
         ws3.getCell(r3, 10).value = { formula: `I${r3}-H${r3}`, result: it.new.price - it.old.price };
         ws3.getCell(r3, 11).value = { formula: `IF(H${r3}=0,"",J${r3}/H${r3})`, result: it.old.price === 0 ? '' : (it.new.price - it.old.price) / it.old.price };
@@ -1133,7 +1234,11 @@ function dcbBuildReport(run, meta) {
     }
     tabBlocks3.push({ s, blockStart, blockEnd: r3 - 1 });
   }
-  finishTable(ws3, 1, 1, Math.max(r3 - 1, 1), h3.length, [3, 19]);
+  finishTable(ws3, 1, 1, Math.max(r3 - 1, 1), h3.length, [3, 11, 14, 15, 19]);
+  for (let r = 2; r < r3; r++) {
+    ws3.getCell(r, 6).alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
+    [11, 14, 15].forEach(n => { ws3.getCell(r, n).alignment = { vertical: 'middle', horizontal: 'center', wrapText: true }; });
+  }
   for (const tb of tabBlocks3) {
     tb.s.items.forEach((it, i) => {
       const fill = dcbStatusFill(it);
@@ -1151,44 +1256,26 @@ function dcbBuildReport(run, meta) {
   h4.forEach((h, i) => { ws4.getCell(1, i + 1).value = h; });
   let r4 = 2;
   const issueFills = [];
+  const blocks4 = [];
   for (const s of run.results) {
+    const start4 = r4;
     for (const it of s.items) {
       if (!dcbIsIssue(it)) continue;
-      [s.sheetName, it.sec.label, it.r, it.part, it.des, it.dsm, it.itemCode, it.remark || it.status, it.old.price, it.old.supplier].forEach((v, j) => { put(ws4, r4, j + 1, v); });
-      ws4.getCell(r4, 9).numFmt = '0.0000';
+      [null, it.sec.label, it.r, it.part, it.des, it.dsm, it.itemCode, it.remark || it.status, it.old.price, it.old.supplier].forEach((v, j) => { put(ws4, r4, j + 1, v); });
+      ws4.getCell(r4, 9).numFmt = DCB_ACCT5;
       issueFills.push([r4, DCB_PRICE_COLORS.issue]);
       r4++;
     }
+    if (r4 > start4) blocks4.push({ name: s.sheetName, start: start4, end: r4 - 1 });
   }
   if (r4 === 2) { ws4.getCell(2, 1).value = 'Nothing needs attention — every priced row was resolved.'; r4 = 3; }
   finishTable(ws4, 1, 1, r4 - 1, h4.length, [3]);
   issueFills.forEach(([r, argb]) => { ws4.getCell(r, 8).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb } }; });
+  for (const [r] of issueFills) ws4.getCell(r, 6).alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
+  for (const bl of blocks4) { put(ws4, bl.start, 1, bl.name); mergeTabBlock(ws4, bl.start, bl.end); }
   styleHeader(ws4, 1, 1, h4.length);
   [24, 18, 7, 22, 52, 13, 14, 70, 14, 40].forEach((w, i) => { ws4.getColumn(i + 1).width = w; });
   if (r4 > 3 || ws4.getCell(2, 1).value !== 'Nothing needs attention — every priced row was resolved.') ws4.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: h4.length } };
-
-  /* ---------- Repairs (template restore) ---------- */
-  const ws5 = wb.addWorksheet('Repairs');
-  const h5 = ['Tab', 'Type', 'Cell', 'Detail'];
-  h5.forEach((h, i) => { ws5.getCell(1, i + 1).value = h; });
-  let r5 = 2;
-  const STYLE_CAP = 400;
-  const tabBlocks5 = [];
-  for (const s of run.results) {
-    const blockStart = r5;
-    const rp = s.repairs || { formulas: [], styles: [], dropdowns: [] };
-    rp.formulas.forEach(x => { put(ws5, r5, 2, x.label ? 'Label restored' : 'Formula restored'); put(ws5, r5, 3, x.addr); put(ws5, r5, 4, x.formula); r5++; });
-    (rp.notRestored || []).forEach(x => { put(ws5, r5, 2, 'Formula NOT restored'); put(ws5, r5, 3, x.addr); put(ws5, r5, 4, x.formula + '  — would give an error with the current inputs; cell left as it was'); r5++; });
-    rp.dropdowns.forEach(x => { put(ws5, r5, 2, 'Dropdown restored'); put(ws5, r5, 3, x.addr); put(ws5, r5, 4, 'Width unit / Per unit list'); r5++; });
-    rp.styles.slice(0, STYLE_CAP).forEach(x => { put(ws5, r5, 2, 'Format reverted to template'); put(ws5, r5, 3, x.addr); put(ws5, r5, 4, x.what); r5++; });
-    if (rp.styles.length > STYLE_CAP) { put(ws5, r5, 2, 'Format reverted to template'); put(ws5, r5, 3, '…'); put(ws5, r5, 4, `${rp.styles.length - STYLE_CAP} more cells`); r5++; }
-    if (r5 === blockStart) { put(ws5, r5, 2, 'No repair needed'); put(ws5, r5, 4, 'Formulas and formatting already matched the template.'); r5++; }
-    tabBlocks5.push({ s, blockStart, blockEnd: r5 - 1 });
-  }
-  finishTable(ws5, 1, 1, r5 - 1, 4, [3]);
-  for (const tb of tabBlocks5) { put(ws5, tb.blockStart, 1, tb.s.sheetName); mergeTabBlock(ws5, tb.blockStart, tb.blockEnd); }
-  styleHeader(ws5, 1, 1, 4);
-  [24, 28, 12, 90].forEach((w, i) => { ws5.getColumn(i + 1).width = w; });
 
   return wb;
 }
