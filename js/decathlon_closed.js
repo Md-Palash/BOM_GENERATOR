@@ -409,8 +409,8 @@ const DCB_SECTION_DEFS = [
 const DCB = { type: 1, desig: 2, dsm: 3, model: 4, supplier: 6, width: 7, widthUnit: 8, price: 9, usd: 21, localSum: 19, marker: 22, summaryUsd: 12, localTransportVal: 9 };
 const DCB_MAXCOL = 27;
 // Accounting number formats (unit price needs 5 decimals so flat rates like 0.00054 stay visible)
-const DCB_ACCT5 = '_($* #,##0.00000_);_($* (#,##0.00000);_($* "-"?????_);_(@_)';
-const DCB_ACCT4 = '_($* #,##0.0000_);_($* (#,##0.0000);_($* "-"????_);_(@_)';
+const DCB_ACCT5 = '"$"* #,##0.00000;"$"* -#,##0.00000';
+const DCB_ACCT4 = '"$"* #,##0.0000;"$"* -#,##0.0000';
 const DCB_NUMERIC_TEXT_RE = /^\s*-?\d+(\.\d+)?\s*$/;
 
 function dcbSectionRowSet(L) {
@@ -740,10 +740,16 @@ function dcbRepairSheet(ws, L, T, items) {
       if (!tc) continue;
       const cell = ws.getCell(r, c);
       if (tc.type === ExcelJS.ValueType.Formula && tc.formula) {
-        if (cell.type === ExcelJS.ValueType.Formula) continue; // never overwrite an existing formula
         if (isItemRow && DCB_INPUT_COLS.has(c)) continue;      // input column on an item row - leave the user's value
+        if (r === L.localRow && c === DCB.localTransportVal) continue; // written by the Open Book engine
         let f = dcbTranslateFormula(tc.formula, mapRow);
         if (isItemRow && c === DCB.dsm && dsm7.has(r)) f = f.replace(/,\s*10\)/, ',7)');
+        if (cell.type === ExcelJS.ValueType.Formula) {
+          const cur = (cell.formula || '');
+          const nz = x => x.replace(/[\s$]/g, '').toUpperCase();
+          if (nz(cur) === nz(f)) continue;                      // already correct
+          if (isItemRow && c === DCB.dsm && /^LEFT\(B\d+,(7|10)\)$/i.test(nz(cur)) && nz(cur).startsWith('LEFT(B' + r + ',')) continue;
+        }
         out.formulas.push({ addr: cell.address, formula: '=' + f, cell, old: cell.value });
         cell.value = { formula: f };
       } else if (isItemRow && c === 20 && tc.value === 'USD') { // "Local currency" label that every row carries
@@ -918,7 +924,7 @@ function dcbProcessSheet(wb, ws, L, opts) {
   const secRowsF = dcbSectionRowSet(L);
   for (const r of secRowsF) {
     const pc = ws.getCell(r, DCB.price);
-    pc.style = Object.assign({}, pc.style, { numFmt: DCB_ACCT5 });
+    pc.style = Object.assign({}, pc.style, { numFmt: DCB_ACCT5, alignment: Object.assign({}, pc.alignment, { horizontal: 'right', wrapText: false }) });
   }
   for (const it of items) {
     if (it.kind === 'ok' && it.pricing && it.pricing.highestPriceTaken) {
@@ -1114,6 +1120,8 @@ function dcbBuildReport(run, meta) {
     ws.getCell(r, cPct).numFmt = PCT;
   }
 
+  const acct = (ws, r, c) => { ws.getCell(r, c).alignment = { vertical: 'middle', horizontal: 'right', wrapText: false }; };
+
   const lineDefs = s => [
     ...s.layout.sections.map(sec => ({ label: sec.label, get: sn => sn.sections[sec.name], kind: 'section' })),
     { label: 'Total BOM cost', get: sn => sn.bom, kind: 'total' },
@@ -1166,7 +1174,7 @@ function dcbBuildReport(run, meta) {
   });
   const lastSum = hr + 1 + run.results.length;
   finishTable(ws1, hr, 1, lastSum, nSumCols, [1, 3]);
-  for (let r = hr + 2; r <= lastSum; r++) [4, 5, 6, 8, 9, 10].forEach(c => { ws1.getCell(r, c).numFmt = DCB_ACCT4; });
+  for (let r = hr + 2; r <= lastSum; r++) [4, 5, 6, 8, 9, 10].forEach(c => { ws1.getCell(r, c).numFmt = DCB_ACCT4; acct(ws1, r, c); });
   // coloured key groups (Total BOM cost, VENDOR PRICE)
   run.results.forEach((s, i) => {
     GROUPS.forEach((g, gi) => {
@@ -1198,7 +1206,7 @@ function dcbBuildReport(run, meta) {
     tabBlocks2.push({ s, blockStart, blockEnd: r2 - 1, lines: lineDefs(s).map((ln, i) => ({ kind: ln.kind, row: blockStart + i })) });
   }
   finishTable(ws2, 1, 1, r2 - 1, 6);
-  for (let r = 2; r < r2; r++) [3, 4, 5].forEach(c => { ws2.getCell(r, c).numFmt = DCB_ACCT4; });
+  for (let r = 2; r < r2; r++) [3, 4, 5].forEach(c => { ws2.getCell(r, c).numFmt = DCB_ACCT4; acct(ws2, r, c); });
   for (const tb of tabBlocks2) {
     for (const ln of tb.lines) {
       if (ln.kind !== 'total') continue; // only Total BOM cost & VENDOR PRICE are coloured
@@ -1242,6 +1250,7 @@ function dcbBuildReport(run, meta) {
   finishTable(ws3, 1, 1, Math.max(r3 - 1, 1), h3.length, [3, 11, 14, 15, 19]);
   for (let r = 2; r < r3; r++) {
     ws3.getCell(r, 6).alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
+    [8, 9, 10, 16, 17, 18].forEach(n => acct(ws3, r, n));
     [11, 14, 15].forEach(n => { ws3.getCell(r, n).alignment = { vertical: 'middle', horizontal: 'center', wrapText: true }; });
   }
   for (const tb of tabBlocks3) {
@@ -1276,7 +1285,7 @@ function dcbBuildReport(run, meta) {
   if (r4 === 2) { ws4.getCell(2, 1).value = 'Nothing needs attention — every priced row was resolved.'; r4 = 3; }
   finishTable(ws4, 1, 1, r4 - 1, h4.length, [3]);
   issueFills.forEach(([r, argb]) => { ws4.getCell(r, 8).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb } }; });
-  for (const [r] of issueFills) ws4.getCell(r, 6).alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
+  for (const [r] of issueFills) { ws4.getCell(r, 6).alignment = { vertical: 'middle', horizontal: 'left', wrapText: true }; acct(ws4, r, 9); }
   for (const bl of blocks4) { put(ws4, bl.start, 1, bl.name); mergeTabBlock(ws4, bl.start, bl.end); }
   styleHeader(ws4, 1, 1, h4.length);
   [24, 18, 7, 22, 52, 13, 14, 70, 14, 40].forEach((w, i) => { ws4.getColumn(i + 1).width = w; });
