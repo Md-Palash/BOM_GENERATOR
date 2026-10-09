@@ -521,7 +521,7 @@ const DECATHLON_SECTION_CONFIG = {
   Label:                { headerRow: 70,  firstBlank: 71,  lastBlank: 85,  totalRow: 86,  descCol: 2, formulaCols: DECATHLON_FORMULA_COLS },
   Graphic:              { headerRow: 87,  firstBlank: 88,  lastBlank: 107, totalRow: 108, descCol: 2, formulaCols: DECATHLON_FORMULA_COLS },
   Accessories:          { headerRow: 109, firstBlank: 110, lastBlank: 169, totalRow: 170, descCol: 2, formulaCols: DECATHLON_FORMULA_COLS },
-  'Sales Packaging':    { headerRow: 171, firstBlank: 172, lastBlank: 186, totalRow: 187, descCol: 2, formulaCols: DECATHLON_FORMULA_COLS },
+  'Sales Packaging':    { headerRow: 171, firstBlank: 172, lastBlank: 186, totalRow: 187, descCol: 2, formulaCols: DECATHLON_FORMULA_COLS, cartonFix: true },
   'Transport Packaging': { headerRow: 188, firstBlank: 189, lastBlank: 198, totalRow: 199, descCol: 2, formulaCols: DECATHLON_FORMULA_COLS },
 };
 
@@ -534,6 +534,37 @@ const DECATHLON_SECTION_CONFIG = {
 // completely untouched — extracted items are appended into the blank rows
 // below them, and only that remaining capacity drives whether more rows
 // need to be inserted.
+// ---- Cell-hygiene helpers (no "number stored as text", consistent formulas) ----
+// Fixed CPM per business rule (replaces the template's VLOOKUP formula).
+const DECATHLON_FIXED_CPM = 0.036;
+// Accounting format for Unit price (column I), 5 decimals so tiny flat rates
+// such as thread 0.00054 stay visible.
+const DECATHLON_ACCOUNTING_FMT = '_("$"* #,##0.00000_);_("$"* (#,##0.00000);_("$"* "-"??_);_(@_)';
+// A purely numeric string (e.g. Usable Width "150", a numeric-looking
+// supplier/type) is written as a real number so Excel never shows the green
+// "number stored as text" triangle. Values with a leading zero or more than
+// 15 digits are left as text, since converting would change them.
+function decathlonCoerceValue(v) {
+  if (typeof v !== 'string') return v;
+  const t = v.trim();
+  if (!/^-?\d+(\.\d+)?$/.test(t)) return v;
+  if (/^-?0\d/.test(t)) return v;
+  if (t.replace(/[-.]/g, '').length > 15) return v;
+  return Number(t);
+}
+// Uniform DSM-code formula for EVERY item row: the first 10 characters when
+// they form a number, otherwise the first 7. Using one identical formula on
+// all rows avoids Excel's "inconsistent formula" flag that appeared when
+// some rows had LEFT(B,10) and others LEFT(B,7).
+function decathlonDsmFormula(r) {
+  return `IF(ISNUMBER(--LEFT(B${r},10)),LEFT(B${r},10),LEFT(B${r},7))`;
+}
+// Whole-style assignment (not .numFmt/.alignment alone) so a change can never
+// bleed into other cells sharing the same pooled style record in ExcelJS.
+function decathlonStyleCell(cell, patch) {
+  cell.style = Object.assign({}, cell.style, patch);
+}
+
 function countExistingFilledRows(ws, first, last, descCol) {
   let count = 0;
   for (let r = first; r <= last; r++) {
@@ -586,13 +617,13 @@ function fillSectionDecathlon(ws, cfg, items, maxSheetRow) {
       const cell = ws.getCell(r, col);
       cell.value = null;
     }
-    ws.getCell(r, descCol).value = item.extractedInfo;
+    ws.getCell(r, descCol).value = decathlonCoerceValue(item.extractedInfo);
     if (item.unit) ws.getCell(r, UNIT_COL).value = item.unit;
     if (cfg.extraCols) {
       for (const { col, compute, styleCompute } of cfg.extraCols) {
         const cell = ws.getCell(r, col);
         const val = compute(item, r);
-        if (val !== null && val !== undefined) cell.value = val;
+        if (val !== null && val !== undefined) cell.value = decathlonCoerceValue(val);
         if (styleCompute) {
           const font = styleCompute(item);
           // Assigning cell.font alone on a still-default (never individually
@@ -622,6 +653,29 @@ function fillSectionDecathlon(ws, cfg, items, maxSheetRow) {
     }
   } else {
     remergeShifted(ws, oldMerges, 0, 0);
+  }
+
+  // Template fix: the pre-filled "Carton" row's Consumption was =1/G (no 2%),
+  // while the sibling rows (Blister poly, Carton sticker) carry =1/G+2%.
+  // Corrected here so Carton gets the same 2% uplift.
+  if (cfg.cartonFix) {
+    for (let r = cfg.firstBlank; r < first; r++) {
+      if (String(ws.getCell(r, 1).value || '').trim().toLowerCase() === 'carton') {
+        ws.getCell(r, 12).value = { formula: `1/G${r}+2%` };
+      }
+    }
+  }
+
+  // Per-row formatting/formula hygiene for the WHOLE section capacity (items,
+  // pre-filled rows, unused rows, inserted rows) so every row is identical:
+  //  - C: one uniform DSM-code formula
+  //  - G (Usable width): centre / middle
+  //  - I (Unit price): accounting format
+  for (let r = cfg.firstBlank; r <= last; r++) {
+    ws.getCell(r, 3).value = { formula: decathlonDsmFormula(r) };
+    const g = ws.getCell(r, 7);
+    decathlonStyleCell(g, { alignment: Object.assign({}, g.alignment, { horizontal: 'center', vertical: 'middle' }) });
+    decathlonStyleCell(ws.getCell(r, 9), { numFmt: DECATHLON_ACCOUNTING_FMT });
   }
 
   // Row-hiding is intentionally NOT done here. Sections are filled
@@ -1053,11 +1107,21 @@ function decathlonLookupFabricPrice(idx, dsm, itemCode) {
   if (!trues.length) return { error: 'Fabric price not found (no TRUE row for this DSM)' };
 
   let pool = trues;
+  let chinaFallback = false;
   if (trues.length > 1) {
     const code = squashDecathlonCode(itemCode);
     pool = code ? trues.filter(e => e.itemCode === code) : [];
     if (!pool.length) {
-      return { error: `Fabric price not found (${trues.length} TRUE rows for this DSM, Item code ${code ? '"' + code + '" ' : 'missing / '}not matched)` };
+      // Several TRUE rows and the Item code matched none of them -> use the
+      // China-region price (business rule).
+      pool = trues.filter(e => decathlonNormalizeOrigin(e.region) === 'china');
+      if (!pool.length) {
+        return { error: `Fabric price not found (${trues.length} TRUE rows for this DSM, Item code ${code ? '"' + code + '" ' : 'missing / '}not matched, and none is China region)` };
+      }
+      chinaFallback = true;
+      // More than one China row -> take the highest valid price.
+      const valid = pool.filter(e => !isNaN(e.price));
+      if (valid.length > 1) pool = [valid.reduce((a, b) => (b.price > a.price ? b : a))];
     }
     if (pool.length > 1 && new Set(pool.map(e => e.price)).size > 1) {
       return { error: `Fabric price ambiguous (${pool.length} TRUE rows with different prices for DSM + Item code "${code}")` };
@@ -1067,7 +1131,7 @@ function decathlonLookupFabricPrice(idx, dsm, itemCode) {
   if (isNaN(chosen.price)) {
     return { error: chosen.rawPrice ? `Fabric price found, not a valid number ("${chosen.rawPrice}")` : 'Fabric price found, but Price cell is blank' };
   }
-  return { entry: chosen };
+  return { entry: chosen, chinaFallback };
 }
 
 function computeDecathlonFabricPricing(r, fabricPriceIndex) {
@@ -1078,7 +1142,7 @@ function computeDecathlonFabricPricing(r, fabricPriceIndex) {
   const e = res.entry;
   return {
     supplierText: e.supplier, isError: false, unitPrice: e.price,
-    needsApiMarker: false, highestPriceTaken: false,
+    needsApiMarker: false, highestPriceTaken: false, chinaFallback: !!res.chinaFallback,
     usableWidth: e.width,          // -> column G (Usable Width)
     apiMarkerText: e.region,       // -> column V (Api marker): region text, no % uplift for fabrics
   };
@@ -1094,7 +1158,7 @@ function fillDecathlonWorksheet(ws, extracted, r3List, priceIndex, fabricPriceIn
   let maxRow = originalRowCount;
   normalizeFormulas(ws, maxRow, 27);
 
-  if (productName) ws.getCell('B1').value = productName;
+  if (productName) ws.getCell('B1').value = decathlonCoerceValue(productName);
 
   // CC and R3 are written as real numbers (not strings) so Excel doesn't
   // flag them with a "number stored as text" warning. A merged R3 cell
@@ -1110,6 +1174,12 @@ function fillDecathlonWorksheet(ws, extracted, r3List, priceIndex, fabricPriceIn
     ws.getCell('B4').value = Number.isFinite(r3Num) ? r3Num : String(r3s[0]);
   } else if (r3s.length > 1) {
     ws.getCell('B4').value = r3s.join(', ');
+  }
+
+  // Header block: B1:B6 centred horizontally and vertically.
+  for (let r = 1; r <= 6; r++) {
+    const c = ws.getCell(r, 2);
+    decathlonStyleCell(c, { alignment: Object.assign({}, c.alignment, { horizontal: 'center', vertical: 'middle' }) });
   }
 
   const toItems = (rows, sectionName) => {
@@ -1136,18 +1206,6 @@ function fillDecathlonWorksheet(ws, extracted, r3List, priceIndex, fabricPriceIn
   };
   const extraCols = [
     { col: 1, compute: it => it.type },
-    {
-      // C — DSM code, recomputed from the Designation text via
-      // LEFT(B,N). The template's own row formula is already
-      // "=LEFT(B{row},10)", correct for the (default, majority) 10-digit
-      // DSM codes seen in tech packs, and is left completely untouched for
-      // those. The only other length actually used is 7 digits, in which
-      // case this row's formula is overridden to LEFT(B{row},7) instead -
-      // any other/unexpected length falls back to the unchanged default,
-      // same as today.
-      col: 3,
-      compute: (it, r) => (it.dsmLen === 7) ? { formula: `LEFT(B${r},7)` } : null,
-    },
     { col: 12, compute: it => it.qty }, // null/undefined -> cell left untouched
     {
       // D — Model code column; normally left blank. Repurposed to flag the
@@ -1157,7 +1215,7 @@ function fillDecathlonWorksheet(ws, extracted, r3List, priceIndex, fabricPriceIn
       // right next to the price it applies to rather than hidden in a
       // supplier-text comment.
       col: 4,
-      compute: it => (it.pricing && it.pricing.highestPriceTaken) ? 'Highest price taken' : null,
+      compute: it => !it.pricing ? null : (it.pricing.highestPriceTaken ? 'Highest price taken' : (it.pricing.chinaFallback ? 'China price taken' : null)),
     },
     {
       col: 6, // Component supplier — supplier name, or a "DSM is missing" /
@@ -1233,6 +1291,20 @@ function fillDecathlonWorksheet(ws, extracted, r3List, priceIndex, fabricPriceIn
   const localTransportRow = LOCAL_TRANSPORT_ROW + totalRowShift;
   const apiMarkerBottomRow = API_MARKER_BOTTOM_ROW + totalRowShift;
   ws.getCell(localTransportRow, 9).value = { formula: `SUM(V${API_MARKER_TOP_ROW}:V${apiMarkerBottomRow})` };
+
+  // CPM / PPM process block (template rows 204-214, shifted by any row
+  // insertion above): CPM of the first process row is a FIXED 0.036 value,
+  // not a lookup formula. "PPM Calculated" (H) is written with one identical
+  // formula on all 11 rows (profit F is a fraction, e.g. 0.1 = 10%), which
+  // also removes the inconsistent-formula flag the template's H204 caused.
+  const cpmFirstRow = 204 + totalRowShift;
+  const cpmCell = ws.getCell(cpmFirstRow, 5);
+  cpmCell.value = DECATHLON_FIXED_CPM;
+  decathlonStyleCell(cpmCell, { numFmt: '0.000' });
+  for (let i = 0; i <= 10; i++) {
+    const r = cpmFirstRow + i;
+    ws.getCell(r, 8).value = { formula: `ROUND(IF(A${r} <> "", IF(VLOOKUP(A${r}, 'Cbd-162735-CM-Process'!A:D, 2, FALSE) = "PPM", IF(G${r}<>"", G${r}, 0), IF(E${r}<>"", E${r}, 0)*(1+IF(F${r}<>"", F${r}, 0))), 0),4)` };
+  }
 
   return counts;
 }
