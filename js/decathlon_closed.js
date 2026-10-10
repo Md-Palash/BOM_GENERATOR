@@ -507,7 +507,7 @@ function dcbSnapshot(engine, ws, L, itemRows, cachedFallback) {
 const DCB_PRICE_COLORS = { changed: 'FFB7E1A1', same: 'FFFFC0CB', issue: 'FFFF7C80' };
 function dcbIsIssue(it) {
   if (it.kind === 'fail') return true;
-  if (it.kind === 'skip') return !(it.status === 'Skipped – no DSM' && (it.sec.name === 'Sales Packaging' || it.sec.name === 'Transport Packaging'));
+  if (it.kind === 'skip') return !(it.status === 'Skipped – non-continuous zipper' || (it.status === 'Skipped – no DSM' && (it.sec.name === 'Sales Packaging' || it.sec.name === 'Transport Packaging')));
   return false;
 }
 function dcbPriceColorKey(it) {
@@ -828,7 +828,9 @@ function dcbProcessSheet(wb, ws, L, opts) {
     const flat = fabricStyle ? null : decathlonFlatRateFor(row);
 
     let pricing = null;
-    if (!flat && !dsm) {
+    if (decathlonIsNonContinuousZipper(row, sec.name)) {
+      it.kind = 'skip'; it.status = 'Skipped – non-continuous zipper'; it.remark = 'Only continuous zippers ("CONTINU" in the Designation) are priced; previous price kept.';
+    } else if (!flat && !dsm) {
       it.kind = 'skip'; it.status = 'Skipped – no DSM'; it.remark = 'No 10/7-digit DSM at the start of the Designation (starts with "' + des.slice(0, 24) + '"); row left unchanged.';
     } else if (fabricStyle && !opts.fabricIdx) {
       it.kind = 'skip'; it.status = 'Skipped – fabric list not loaded'; it.remark = 'Upload a fabric price list to update this row.';
@@ -934,6 +936,8 @@ function dcbRefreshCachedResults(wb, ws) {
 async function dcbRunUpdate(arrayBuffer, opts) {
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(arrayBuffer);
+  // The old Summary (from the Open Book file) and any earlier Comparison are replaced by a fresh Comparison sheet.
+  for (const stale of wb.worksheets.filter(w => /^(summary|comparison)$/i.test(w.name))) wb.removeWorksheet(stale.id);
   const results = [];
   const skippedTabs = [];
   if (!opts.tpl) {
@@ -950,6 +954,7 @@ async function dcbRunUpdate(arrayBuffer, opts) {
     results.push(dcbProcessSheet(wb, ws, L, opts));
   }
   if (!results.length) throw new Error('No Decathlon cost-sheet tabs were recognised in this workbook (looked for FABRICS … Total bom cost).');
+  dcbAddComparisonSheet(wb, results);
   wb.calcProperties = Object.assign({}, wb.calcProperties, { fullCalcOnLoad: true });
   const buffer = await wb.xlsx.writeBuffer();
   return { buffer, results, skippedTabs };
@@ -1038,66 +1043,6 @@ function dcbBuildReport(run, meta) {
     { label: 'EXW price', get: sn => sn.exw, kind: 'line' },
     { label: 'VENDOR PRICE', get: sn => sn.vendor, kind: 'total' },
   ];
-
-  /* ---------- Summary ---------- */
-  const ws1 = wb.addWorksheet('Summary');
-  ws1.getCell('A1').value = 'Decathlon Price Update — Change Report';
-  ws1.getCell('A1').font = { bold: true, size: 16 };
-  const info = [
-    ['Generated', meta.generated],
-    ['Cost sheet (previous version)', meta.costSheetName],
-    ['Fabric price list', meta.fabricInfo],
-    ['Accessories price list', meta.accInfo],
-    ['All amounts', 'USD price. Δ = After − Before.'],
-    ['Price cell colours (cost sheet, Unit price)', 'Green = price changed | Pink = same as previous | Red = issue (previous price kept)'],
-  ];
-  info.forEach((p, i) => { put(ws1, 3 + i, 1, p[0]); put(ws1, 3 + i, 2, p[1]); ws1.getCell(3 + i, 1).font = { bold: true }; });
-  finishTable(ws1, 3, 1, 3 + info.length - 1, 2);
-  info.forEach((p, i) => { ws1.getCell(3 + i, 1).font = { bold: true }; });
-  ws1.getColumn(1).width = 30; ws1.getColumn(2).width = 40; ws1.getColumn(3).width = 12;
-
-  const hr = 3 + info.length + 1;               // group-header row; sub-header = hr + 1
-  const GROUPS = [
-    { title: 'Total BOM cost', get: sn => sn.bom, key: true },
-    { title: 'Total CM price', get: sn => sn.cm },
-    { title: 'VENDOR PRICE',   get: sn => sn.vendor, key: true },
-  ];
-  const nSumCols = 3 + GROUPS.length * 4;
-  ['Tab', 'Product', 'CC'].forEach((h, i) => { ws1.getCell(hr, i + 1).value = h; });
-  GROUPS.forEach((g, gi) => {
-    const c0 = 4 + gi * 4;
-    ws1.getCell(hr, c0).value = g.title;
-    ['Before', 'After', 'Δ', 'Δ %'].forEach((h, k) => { ws1.getCell(hr + 1, c0 + k).value = h; });
-  });
-  run.results.forEach((s, i) => {
-    const r = hr + 2 + i;
-    put(ws1, r, 1, s.sheetName); put(ws1, r, 2, s.productName); put(ws1, r, 3, s.cc);
-    GROUPS.forEach((g, gi) => {
-      const c0 = 4 + gi * 4;
-      const bv = g.get(s.before), av = g.get(s.after);
-      ws1.getCell(r, c0).value = bv; ws1.getCell(r, c0 + 1).value = av;
-      ws1.getCell(r, c0).numFmt = MONEY; ws1.getCell(r, c0 + 1).numFmt = MONEY;
-      putDelta(ws1, r, c0, c0 + 1, c0 + 2, c0 + 3, bv, av);
-    });
-  });
-  const lastSum = hr + 1 + run.results.length;
-  finishTable(ws1, hr, 1, lastSum, nSumCols, [1, 3]);
-  // coloured key groups (Total BOM cost, VENDOR PRICE)
-  run.results.forEach((s, i) => {
-    GROUPS.forEach((g, gi) => {
-      if (!g.key) return;
-      for (let k = 0; k < 4; k++) ws1.getCell(hr + 2 + i, 4 + gi * 4 + k).fill = TOTAL_FILL;
-    });
-  });
-  ['Tab', 'Product', 'CC'].forEach((h, i) => { ws1.mergeCells(hr, i + 1, hr + 1, i + 1); });
-  GROUPS.forEach((g, gi) => { ws1.mergeCells(hr, 4 + gi * 4, hr, 7 + gi * 4); });
-  styleHeader(ws1, hr, 1, nSumCols); styleHeader(ws1, hr + 1, 1, nSumCols);
-  for (let c = 4; c <= nSumCols; c++) ws1.getColumn(c).width = ((c - 4) % 4 >= 2) ? 13 : 16;
-  if (run.skippedTabs.length) {
-    ws1.getCell(lastSum + 2, 1).value = 'Tabs not treated as cost sheets (left untouched):';
-    ws1.getCell(lastSum + 2, 1).font = { bold: true };
-    ws1.getCell(lastSum + 2, 2).value = run.skippedTabs.join(', ');
-  }
 
   /* ---------- Section Costs ---------- */
   const ws2 = wb.addWorksheet('Section Costs');
@@ -1216,6 +1161,84 @@ function dcbBuildReport(run, meta) {
   [24, 28, 12, 90].forEach((w, i) => { ws5.getColumn(i + 1).width = w; });
 
   return wb;
+}
+
+/* ============================================================
+   5b. COMPARISON SHEET (added to the updated cost workbook)
+   Same lines as the report's "Section Costs" sheet. Before = fixed values
+   (snapshot of the uploaded sheet). After = live INDEX/MATCH formulas that
+   find each total by its row label inside the tab, so they follow later
+   edits and survive row / column insertions and deletions. Δ and Δ% are
+   formulas too.
+   ============================================================ */
+function dcbAddComparisonSheet(wb, results) {
+  const old = wb.getWorksheet('Comparison');
+  if (old) wb.removeWorksheet(old.id);
+  const ws = wb.addWorksheet('Comparison');
+  const THIN = { style: 'thin', color: { argb: 'FF9CA3AF' } };
+  const BORDER = { top: THIN, left: THIN, bottom: THIN, right: THIN };
+  const TOTAL_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEFF4FF' } };
+  const MONEY = '#,##0.0000', PCT = '0.00%';
+  ['Tab', 'Line', 'Before (USD)', 'After (USD)', 'Δ (USD)', 'Δ %'].forEach((h, i) => {
+    const c = ws.getCell(1, i + 1);
+    c.value = h; c.font = { bold: true }; c.border = BORDER;
+    c.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+  });
+  ws.getRow(1).height = 30;
+
+  const labelCol = (src, row) => {
+    for (let c = 1; c <= 10; c++) { const t = dcbCellText(src, row, c).trim(); if (t) return { text: t, col: c }; }
+    return null;
+  };
+  const letter = n => ws.getColumn(n).letter;
+  let r = 2;
+  for (const s of results) {
+    const src = wb.getWorksheet(s.sheetName);
+    const L = s.layout;
+    const lines = [
+      ...L.sections.map(sec => ({ display: sec.label, row: sec.totalRow, val: DCB.usd, before: s.before.sections[sec.name], after: s.after.sections[sec.name] })),
+      { display: 'Total BOM cost', row: L.bomRow, val: DCB.usd, before: s.before.bom, after: s.after.bom, total: true },
+      { display: 'Total CM price', row: L.cmRow, val: DCB.summaryUsd, before: s.before.cm, after: s.after.cm },
+      { display: 'Local Transport (Api marker total)', row: L.localRow, val: DCB.localTransportVal, before: s.before.local, after: s.after.local },
+      { display: 'Total other costs', row: L.otherRow, val: DCB.summaryUsd, before: s.before.other, after: s.after.other },
+      { display: 'EXW price', row: L.exwRow, val: DCB.summaryUsd, before: s.before.exw, after: s.after.exw },
+      { display: 'VENDOR PRICE', row: L.vendorRow, val: DCB.summaryUsd, before: s.before.vendor, after: s.after.vendor, total: true },
+    ].filter(x => x.row && src);
+    const start = r;
+    for (const ln of lines) {
+      const lab = labelCol(src, ln.row);
+      ws.getCell(r, 2).value = ln.display;
+      if (typeof ln.before === 'number') ws.getCell(r, 3).value = ln.before;
+      if (lab) {
+        const f = decathlonLookupFormula(s.sheetName, lab.text, ws.getColumn(lab.col).letter, ws.getColumn(ln.val).letter);
+        ws.getCell(r, 4).value = { formula: f, result: typeof ln.after === 'number' ? ln.after : 0 };
+      }
+      const b = ln.before, a = ln.after;
+      const hasBoth = typeof b === 'number' && typeof a === 'number';
+      ws.getCell(r, 5).value = { formula: `IF(AND(ISNUMBER(C${r}),ISNUMBER(D${r})),D${r}-C${r},"")`, result: hasBoth ? a - b : '' };
+      ws.getCell(r, 6).value = { formula: `IF(AND(ISNUMBER(C${r}),ISNUMBER(E${r}),C${r}<>0),E${r}/C${r},"")`, result: (hasBoth && b !== 0) ? (a - b) / b : '' };
+      [3, 4, 5].forEach(c => { ws.getCell(r, c).numFmt = MONEY; });
+      ws.getCell(r, 6).numFmt = PCT;
+      for (let c = 1; c <= 6; c++) {
+        const cell = ws.getCell(r, c);
+        cell.border = BORDER;
+        cell.alignment = { vertical: 'middle', horizontal: c <= 2 ? 'left' : 'right', wrapText: true };
+        if (ln.total && c >= 2) { cell.fill = TOTAL_FILL; cell.font = { bold: true }; }
+      }
+      r++;
+    }
+    // Tab name (digit-only names written as real numbers, like the report)
+    const tabCell = ws.getCell(start, 1);
+    const tn = String(s.sheetName).trim();
+    if (/^\d{1,15}$/.test(tn)) { tabCell.value = Number(tn); tabCell.numFmt = '0'.repeat(tn.length); } else tabCell.value = tn;
+    if (r - 1 > start) ws.mergeCells(start, 1, r - 1, 1);
+    for (let rr = start; rr < r; rr++) ws.getCell(rr, 1).border = BORDER;
+    tabCell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+    tabCell.font = { bold: true };
+  }
+  [26, 36, 18, 18, 16, 12].forEach((w, i) => { ws.getColumn(i + 1).width = w; });
+  ws.views = [{ state: 'frozen', ySplit: 1 }];
+  return ws;
 }
 
 /* ============================================================

@@ -936,6 +936,10 @@ const DECATHLON_DEFAULT_FONT = { color: { argb: 'FF000000' } };
 //     instead.
 //  5. A match sourced from China or Vietnam gets an Api marker formula
 //     (Total Local price * 15%); Bangladesh does not.
+function decathlonIsNonContinuousZipper(r, sectionName) {
+  return sectionName === 'Accessories' && isDecathlonZipperPart(r) && !/continu/i.test(decathlonDesignation(r) || '');
+}
+
 function computeDecathlonPricing(r, sectionName, priceIndex, fabricPriceIndex) {
   const isFabric = sectionName === 'Fabrics';
   const isInterlining = decathlonIsInterlining(r);
@@ -946,6 +950,10 @@ function computeDecathlonPricing(r, sectionName, priceIndex, fabricPriceIndex) {
     if (!fabricPriceIndex) return null;
     return computeDecathlonFabricPricing(r, fabricPriceIndex);
   }
+
+  // Zipper rule: only continuous zippers ("CONTINU" in the designation) are
+  // priced; every other zipper is left blank (no price, supplier or marker).
+  if (decathlonIsNonContinuousZipper(r, sectionName)) return null;
 
   const flat = decathlonFlatRateFor(r);
   if (flat) {
@@ -1101,8 +1109,14 @@ function buildDecathlonFabricPriceIndex(rows) {
 // can't be resolved cleanly returns { error } so it's flagged in red in the
 // sheet instead of silently guessing.
 function decathlonLookupFabricPrice(idx, dsm, itemCode) {
-  const entries = idx.get(squashDecathlonCode(dsm));
-  if (!entries || !entries.length) return { error: 'Fabric price not found (DSM not in fabric price list)' };
+  // Fabric-only rule: a 7-digit DSM is searched as BOTH "NNNNNNN" and
+  // "980NNNNNNN" in the price file (the list often stores the 10-digit
+  // form). The sheet itself keeps the 7-digit code; rows found under either
+  // key are pooled and go through the same TRUE / Item code / China rules.
+  const dsmKey = squashDecathlonCode(dsm);
+  const entries = (idx.get(dsmKey) || []).slice();
+  if (/^\d{7}$/.test(dsmKey)) entries.push(...(idx.get('980' + dsmKey) || []));
+  if (!entries.length) return { error: 'Fabric price not found (DSM not in fabric price list' + (/^\d{7}$/.test(dsmKey) ? ', also tried 980' + dsmKey : '') + ')' };
   const trues = entries.filter(e => e.isTrue);
   if (!trues.length) return { error: 'Fabric price not found (no TRUE row for this DSM)' };
 
@@ -1356,6 +1370,69 @@ function cloneWorksheetInto(targetWorkbook, sourceWs, newName) {
   return newWs;
 }
 
+/* ============================================================
+   SUMMARY SHEET (formula-driven)
+   Each value is looked up by its row LABEL and its column (INDEX/MATCH on
+   whole columns), never by a fixed cell address, so the Summary keeps
+   finding the right cell when rows are inserted or deleted in a cost-sheet
+   tab. Column references ($U:$U, $A:$A ...) are adjusted by Excel itself
+   when columns are inserted or deleted.
+   ============================================================ */
+const DECATHLON_SUMMARY_COLUMNS = [
+  { header: 'Fabric cost',              label: 'Total Fabrics cost',              labelCol: 'A', valueCol: 'U' },
+  { header: 'Legal Marking cost',       label: 'Total Legal Marking cost',        labelCol: 'A', valueCol: 'U' },
+  { header: 'Label cost',               label: 'Total Labels cost',               labelCol: 'A', valueCol: 'U' },
+  { header: 'Graphic cost',             label: 'Total Graphics cost',             labelCol: 'A', valueCol: 'U' },
+  { header: 'Accessories cost',         label: 'Total Accessories cost',          labelCol: 'A', valueCol: 'U' },
+  { header: 'Sales Packaging cost',     label: 'Total Sales Packaging cost',      labelCol: 'A', valueCol: 'U' },
+  { header: 'Transport Packaging cost', label: 'Total Transport Packaging cost',  labelCol: 'A', valueCol: 'U' },
+  { header: 'Total other costs',        label: 'TOTAL OTHER COSTS',               labelCol: 'A', valueCol: 'L' },
+  { header: 'Total BOM cost',           label: 'Total bom cost',                  labelCol: 'A', valueCol: 'U' },
+  { header: 'Total CM price',           label: 'TOTAL CM PRICE',                  labelCol: 'H', valueCol: 'L' },
+  { header: 'Vendor price',             label: 'VENDOR PRICE',                    labelCol: 'H', valueCol: 'L' },
+];
+function decathlonLookupFormula(sheetName, label, labelCol, valueCol) {
+  const q = "'" + String(sheetName).replace(/'/g, "''") + "'";
+  return `INDEX(${q}!$${valueCol}:$${valueCol},MATCH("${String(label).replace(/"/g, '""')}",${q}!$${labelCol}:$${labelCol},0))`;
+}
+function addDecathlonSummarySheet(workbook, sheetNames) {
+  const ws = workbook.addWorksheet('Summary');
+  const headers = ['CC', 'Tab', ...DECATHLON_SUMMARY_COLUMNS.map(c => c.header)];
+  const THIN = { style: 'thin', color: { argb: 'FF9CA3AF' } };
+  const BORDER = { top: THIN, left: THIN, bottom: THIN, right: THIN };
+  headers.forEach((h, i) => {
+    const c = ws.getCell(1, i + 1);
+    c.value = h;
+    c.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF111827' } };
+    c.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+    c.border = BORDER;
+  });
+  ws.getRow(1).height = 32;
+  const keyCols = new Set(['Total BOM cost', 'Vendor price']);
+  sheetNames.forEach((name, i) => {
+    const r = i + 2;
+    const q = "'" + name.replace(/'/g, "''") + "'";
+    ws.getCell(r, 1).value = { formula: `${q}!B2` };   // CC (cell reference, follows the cell if rows/cols move)
+    ws.getCell(r, 2).value = name;                      // tab name (text)
+    DECATHLON_SUMMARY_COLUMNS.forEach((col, j) => {
+      const cell = ws.getCell(r, 3 + j);
+      cell.value = { formula: decathlonLookupFormula(name, col.label, col.labelCol, col.valueCol) };
+      cell.numFmt = '#,##0.0000';
+      if (keyCols.has(col.header)) { cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEFF4FF' } }; cell.font = { bold: true }; }
+    });
+    for (let c = 1; c <= headers.length; c++) {
+      const cell = ws.getCell(r, c);
+      cell.border = BORDER;
+      cell.alignment = { horizontal: c <= 2 ? 'center' : 'right', vertical: 'middle' };
+    }
+  });
+  ws.getColumn(1).width = 12; ws.getColumn(2).width = 16;
+  for (let c = 3; c <= headers.length; c++) ws.getColumn(c).width = 17;
+  ws.views = [{ state: 'frozen', ySplit: 1 }];
+  return ws;
+}
+
 // Orchestrates multiple CCs (tech packs), each with one or more R3s, into
 // one workbook:
 //  - within a CC, the first R3 (or first R3 whose DSM-code set is new)
@@ -1448,6 +1525,10 @@ async function buildMultiCCCostBreakDown(templateArrayBuffer, ccSessions, priceI
       }
     }
   }
+
+  // Formula-driven Summary tab (one row per cost-sheet tab).
+  addDecathlonSummarySheet(mainWorkbook, [...new Set(report.map(r => r.sheet))]);
+  mainWorkbook.calcProperties = Object.assign({}, mainWorkbook.calcProperties, { fullCalcOnLoad: true });
 
   const buffer = await mainWorkbook.xlsx.writeBuffer();
   return { buffer, report };
