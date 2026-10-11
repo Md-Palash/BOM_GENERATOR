@@ -1352,10 +1352,14 @@ async function buildSupplyChainWorkbook(rows){
 //   Test        = the "FAB PERFORMANCE+ ..." row
 //   CM          = the "CM" row
 //   Others      = "Others/Commercial" row + "HADDAD COMMISSION" row
-//   Total       = sum of the nine columns above (equals Grand total FOB)
+//   Total       = sum of the eight cost columns (equals Grand total FOB)
 //
-// Grey helper columns on the right hold the row numbers the formulas use,
-// so every step can be inspected.
+// Excel-compatibility notes (these formulas must work in real Excel, not just
+// LibreOffice): the sums use SUMIFS / SUM only - no array arithmetic. The one
+// thing that needs an array - finding the LAST "sewing thread" row - is
+// written as a true array formula (MAX(IF(...))), the form Excel always
+// evaluates as an array. Its result, and the other row numbers the formulas
+// need, sit in four helper cells at the far right of the sheet.
 // ============================================================
 function xlSheetRef(name){ return "'" + String(name).replace(/'/g, "''") + "'"; }
 
@@ -1363,27 +1367,30 @@ function addSummarySheet(workbook, tabNames){
   const ws = workbook.addWorksheet('Summary');
   const headers = ['Style', 'Size', 'Fabric Cost', 'Process Cost [Print/EMB/Quilting]', 'Accessories Cost',
     'Packaging Cost', 'Wash Cost', 'Test Cost', 'CM', 'Others Cost', 'Total'];
-  const helperHeaders = ['Acc. header row', 'Acc. total row', 'Last sewing thread row', 'Thread/packaging split row', 'Quilting cost'];
-  const widths = [24, 30, 14, 20, 16, 16, 14, 14, 14, 14, 14, 3, 14, 14, 16, 18, 14];
-  widths.forEach((w, i) => { ws.getColumn(i + 1).width = w; });
+  const helperHeaders = ['Acc. header row', 'Acc. total row', 'Last sewing thread row', 'Thread/packaging split row'];
+  const HELPER_COL = 26; // column Z - well clear of the table
+  const mainWidths = [24, 30, 14, 22, 16, 16, 14, 14, 14, 14, 14];
+  mainWidths.forEach((w, i) => { ws.getColumn(i + 1).width = w; });
+  for (let c = mainWidths.length + 1; c < HELPER_COL; c++) ws.getColumn(c).width = 2; // narrow gap
+  for (let i = 0; i < helperHeaders.length; i++) ws.getColumn(HELPER_COL + i).width = 18;
 
-  const headFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2563EB' } };
+  const headFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFBDD7EE' } }; // light blue
   const helpFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE5E7EB' } };
   const thin = { style: 'thin', color: { argb: 'FFD1D5DB' } };
   const border = { top: thin, left: thin, bottom: thin, right: thin };
 
   const hr = ws.getRow(1);
-  hr.height = 36;
+  hr.height = 50;
   headers.forEach((h, i) => {
     const c = hr.getCell(i + 1);
     c.value = h;
-    c.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    c.font = { bold: true, size: 12, color: { argb: 'FF111827' } };
     c.fill = headFill;
     c.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
     c.border = border;
   });
   helperHeaders.forEach((h, i) => {
-    const c = hr.getCell(13 + i);
+    const c = hr.getCell(HELPER_COL + i);
     c.value = h;
     c.font = { bold: true, color: { argb: 'FF6B7280' } };
     c.fill = helpFill;
@@ -1391,45 +1398,62 @@ function addSummarySheet(workbook, tabNames){
     c.border = border;
   });
 
+  const L = n => numToColLetter(n);
+  const hHdr = L(HELPER_COL), hTot = L(HELPER_COL + 1), hThr = L(HELPER_COL + 2), hSplit = L(HELPER_COL + 3);
+
   tabNames.forEach((tab, i) => {
     const r = i + 2;
     const S = xlSheetRef(tab);
-    const find = (label, col) => `INDEX(${S}!$${col}:$${col},MATCH("${label}",${S}!$A:$A,0))`;
-    // the Accessories rows only (between its header and its total row)
-    const accB = `INDEX(${S}!$B:$B,M${r}+1):INDEX(${S}!$B:$B,N${r}-1)`;
-    const accO = `INDEX(${S}!$O:$O,M${r}+1):INDEX(${S}!$O:$O,N${r}-1)`;
-    const isQuilt = `ISNUMBER(SEARCH("quilting",${accB}))`;
-    const isWash = `ISNUMBER(SEARCH("wash",${accB}))`;
-    const below = `(ROW(${accB})>P${r})`;
-    const upTo = `(ROW(${accB})<=P${r})`;
+    const colA = `${S}!$A:$A`, colB = `${S}!$B:$B`, colO = `${S}!$O:$O`;
+    const find = label => `INDEX(${colO},MATCH("${label}",${colA},0))`;
+    const rng = (col, from, to) => `INDEX(${col},${from}):INDEX(${col},${to})`;
+    const H = `${hHdr}${r}`, T = `${hTot}${r}`, SPLIT = `${hSplit}${r}`;
+    // whole Accessories block / the part down to the last sewing thread /
+    // the part below it
+    const allB = rng(colB, `${H}+1`, `${T}-1`), allO = rng(colO, `${H}+1`, `${T}-1`);
+    const upB = rng(colB, `${H}+1`, SPLIT),     upO = rng(colO, `${H}+1`, SPLIT);
+    const dnB = rng(colB, `${SPLIT}+1`, `${T}-1`), dnO = rng(colO, `${SPLIT}+1`, `${T}-1`);
+    const noneBelow = `${SPLIT}>=${T}-1`; // sewing thread is the last row: nothing below it
 
     const f = {
-      1: `INDEX(${S}!$B:$B,MATCH("STYLE",${S}!$A:$A,0))&""`,
-      2: `INDEX(${S}!$B:$B,MATCH("SIZE",${S}!$A:$A,0))&""`,
-      3: find('TOTAL FABRIC*', 'O'),
-      4: `${find('TOTAL PRINT*', 'O')}+Q${r}`,
-      5: `SUMPRODUCT(${upTo}*(1-${isQuilt}),${accO})`,
-      6: `SUMPRODUCT(${below}*(1-${isQuilt})*(1-${isWash}),${accO})`,
-      7: `SUMPRODUCT(${below}*${isWash}*(1-${isQuilt}),${accO})`,
-      8: find('FAB PERFORMANCE*', 'O'),
-      9: find('CM*', 'O'),
-      10: `${find('OTHERS*', 'O')}+${find('HADDAD COMMISSION*', 'O')}`,
+      1: `INDEX(${colB},MATCH("STYLE",${colA},0))&""`,
+      2: `INDEX(${colB},MATCH("SIZE",${colA},0))&""`,
+      3: find('TOTAL FABRIC*'),
+      4: `${find('TOTAL PRINT*')}+SUMIFS(${allO},${allB},"*quilting*")`,
+      5: `SUM(${upO})-SUMIFS(${upO},${upB},"*quilting*")`,
+      6: `IF(${noneBelow},0,SUM(${dnO})-SUMIFS(${dnO},${dnB},"*quilting*")-G${r})`,
+      7: `IF(${noneBelow},0,SUMIFS(${dnO},${dnB},"*wash*")-SUMIFS(${dnO},${dnB},"*wash*",${dnB},"*quilting*"))`,
+      8: find('FAB PERFORMANCE*'),
+      9: find('CM*'),
+      10: `${find('OTHERS*')}+${find('HADDAD COMMISSION*')}`,
       11: `SUM(C${r}:J${r})`,
-      13: `MATCH("DESCRIPTION [ACCESSORIES]*",${S}!$B:$B,0)`,
-      14: `MATCH("TOTAL ACCESSORIES*",${S}!$A:$A,0)`,
-      15: `SUMPRODUCT(MAX(ISNUMBER(SEARCH("sewing thread",${accB}))*ROW(${accB})))`,
-      16: `IF(O${r}>0,O${r},N${r}-1)`,
-      17: `SUMPRODUCT(--${isQuilt},${accO})`,
     };
     for (const [col, formula] of Object.entries(f)) {
       const c = ws.getCell(r, Number(col));
       c.value = { formula };
       c.border = border;
       const n = Number(col);
-      if (n >= 3 && n <= 10 || n === 17) c.numFmt = '0.0000';
+      if (n >= 3 && n <= 10) c.numFmt = '0.0000';
       if (n === 11) { c.numFmt = '0.0000'; c.font = { bold: true }; }
-      if (n >= 13) { c.font = { color: { argb: 'FF6B7280' } }; c.fill = helpFill; if (n <= 16) c.numFmt = '0'; }
     }
+
+    // helper cells (far right)
+    const helpers = [
+      { col: HELPER_COL,     value: { formula: `MATCH("DESCRIPTION [ACCESSORIES]*",${colB},0)` } },
+      { col: HELPER_COL + 1, value: { formula: `MATCH("TOTAL ACCESSORIES*",${colA},0)` } },
+      // true array formula: last row inside the Accessories block whose
+      // description contains "sewing thread" (0 if there is none)
+      { col: HELPER_COL + 2, value: { formula: `MAX(IF(ISNUMBER(SEARCH("sewing thread",${allB})),ROW(${allB})))`, shareType: 'array', ref: `${hThr}${r}` } },
+      { col: HELPER_COL + 3, value: { formula: `IF(${hThr}${r}>0,${hThr}${r},${T}-1)` } },
+    ];
+    helpers.forEach(h => {
+      const c = ws.getCell(r, h.col);
+      c.value = h.value;
+      c.numFmt = '0';
+      c.font = { color: { argb: 'FF6B7280' } };
+      c.fill = helpFill;
+      c.border = border;
+    });
   });
 
   ws.views = [{ state: 'frozen', ySplit: 1 }];
