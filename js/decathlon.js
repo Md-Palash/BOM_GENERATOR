@@ -47,6 +47,9 @@ const DECATHLON_HEADER_LINE = 'Part Dsm Code Model Component Item Code Grid Valu
 const DECATHLON_R3_CODE_RE = /\(R3\s*Code:\s*(\d+)\)/i;
 const DECATHLON_R3_FALLBACK_RE = /(?:\d{4}\s*:\s*)?(\d+)\s*-\s*(.+?)-\s*(\d+)\.\s*-/i;
 const DECATHLON_QTY_RE = /^\d+(\.\d+)?$/;
+// DSM / Item Code are single tokens: their text runs are joined WITHOUT a space
+// (a stray space would break exact matching against the price list).
+const NO_SPACE_COLS = new Set(['dsm', 'itemCode']);
 
 // DSM code / Item Code are single bare tokens - strip ALL internal
 // whitespace, not just leading/trailing, as a final safety net regardless
@@ -147,12 +150,11 @@ async function extractAllDecathlonBlocks(file, onProgress) {
     items.sort((a, b) => a.y - b.y || a.x - b.x);
     const lines = [];
     for (const it of items) {
-      let line = lines.find(l => Math.abs(l.y - it.y) < 2.5);
+      const last = lines[lines.length - 1];
+      let line = last && Math.abs(last.y - it.y) < 2.5 ? last : null;
       if (!line) { line = { y: it.y, items: [] }; lines.push(line); }
       line.items.push(it);
     }
-    lines.sort((a, b) => a.y - b.y);
-    for (const l of lines) l.items.sort((a, b) => a.x - b.x);
 
     for (const line of lines) {
       const lineText = line.items.map(i => i.text).join(' ').trim().replace(/\s+/g, ' ');
@@ -218,7 +220,6 @@ async function extractAllDecathlonBlocks(file, onProgress) {
       // otherwise-present row in the price list, and (b) shows up wrong/
       // truncated in the Designation cell and its LEFT(...,10) DSM-code
       // formula. Every other column keeps the space-joined behavior.
-      const NO_SPACE_COLS = new Set(['dsm', 'itemCode']);
       const cols = { part: '', dsm: '', model: '', component: '', itemCode: '', gridValue: '', items: '', qty: '', unit: '', comments: '' };
       for (const it of line.items) {
         const col = classifyDecathlonColumn(it.x);
@@ -936,10 +937,6 @@ const DECATHLON_DEFAULT_FONT = { color: { argb: 'FF000000' } };
 //     instead.
 //  5. A match sourced from China or Vietnam gets an Api marker formula
 //     (Total Local price * 15%); Bangladesh does not.
-function decathlonIsNonContinuousZipper(r, sectionName) {
-  return sectionName === 'Accessories' && isDecathlonZipperPart(r) && !/continu/i.test(decathlonDesignation(r) || '');
-}
-
 function computeDecathlonPricing(r, sectionName, priceIndex, fabricPriceIndex) {
   const isFabric = sectionName === 'Fabrics';
   const isInterlining = decathlonIsInterlining(r);
@@ -950,10 +947,6 @@ function computeDecathlonPricing(r, sectionName, priceIndex, fabricPriceIndex) {
     if (!fabricPriceIndex) return null;
     return computeDecathlonFabricPricing(r, fabricPriceIndex);
   }
-
-  // Zipper rule: only continuous zippers ("CONTINU" in the designation) are
-  // priced; every other zipper is left blank (no price, supplier or marker).
-  if (decathlonIsNonContinuousZipper(r, sectionName)) return null;
 
   const flat = decathlonFlatRateFor(r);
   if (flat) {
@@ -1108,44 +1101,54 @@ function buildDecathlonFabricPriceIndex(rows) {
 // checked); if several, the extracted Item Code must match. Anything that
 // can't be resolved cleanly returns { error } so it's flagged in red in the
 // sheet instead of silently guessing.
-function decathlonLookupFabricPrice(idx, dsm, itemCode) {
-  // Fabric-only rule: a 7-digit DSM is searched as BOTH "NNNNNNN" and
-  // "980NNNNNNN" in the price file (the list often stores the 10-digit
-  // form). The sheet itself keeps the 7-digit code; rows found under either
-  // key are pooled and go through the same TRUE / Item code / China rules.
-  const dsmKey = squashDecathlonCode(dsm);
-  const entries = (idx.get(dsmKey) || []).slice();
-  if (/^\d{7}$/.test(dsmKey)) entries.push(...(idx.get('980' + dsmKey) || []));
-  if (!entries.length) return { error: 'Fabric price not found (DSM not in fabric price list' + (/^\d{7}$/.test(dsmKey) ? ', also tried 980' + dsmKey : '') + ')' };
-  const trues = entries.filter(e => e.isTrue);
-  if (!trues.length) return { error: 'Fabric price not found (no TRUE row for this DSM)' };
+function decathlonHighestPrice(rows) {
+  let best = null;
+  for (const e of rows) if (!isNaN(e.price) && (!best || e.price > best.price)) best = e;
+  return best || rows[0];
+}
 
-  let pool = trues;
-  let chinaFallback = false;
-  if (trues.length > 1) {
+// Fabric price lookup rules:
+//  - a 7-digit DSM is searched as BOTH "NNNNNNN" and "980NNNNNNN" (the list
+//    often stores the 10-digit form); the sheet keeps the 7-digit code.
+//  - TRUE rows are used first. One TRUE row -> that row. Several TRUE rows ->
+//    the row(s) whose Item code matches; if none match -> the HIGHEST price.
+//  - No TRUE row but FALSE rows exist -> the FALSE row (the HIGHEST if there
+//    are several), flagged "Sharing price is missing".
+function decathlonLookupFabricPrice(idx, dsm, itemCode) {
+  const dsmKey = squashDecathlonCode(dsm);
+  const is7 = /^\d{7}$/.test(dsmKey);
+  const entries = is7 ? (idx.get(dsmKey) || []).concat(idx.get('980' + dsmKey) || []) : (idx.get(dsmKey) || []);
+  if (!entries.length) return { error: 'Fabric price not found (DSM not in fabric price list' + (is7 ? ', also tried 980' + dsmKey : '') + ')' };
+
+  const trues = entries.filter(e => e.isTrue);
+  let chosen, highestTaken = false, sharingMissing = false;
+  if (!trues.length) {
+    chosen = decathlonHighestPrice(entries);
+    sharingMissing = true;
+  } else if (trues.length === 1) {
+    chosen = trues[0];
+  } else {
     const code = squashDecathlonCode(itemCode);
-    pool = code ? trues.filter(e => e.itemCode === code) : [];
+    const pool = code ? trues.filter(e => e.itemCode === code) : [];
     if (!pool.length) {
-      // Several TRUE rows and the Item code matched none of them -> use the
-      // China-region price (business rule).
-      pool = trues.filter(e => decathlonNormalizeOrigin(e.region) === 'china');
-      if (!pool.length) {
-        return { error: `Fabric price not found (${trues.length} TRUE rows for this DSM, Item code ${code ? '"' + code + '" ' : 'missing / '}not matched, and none is China region)` };
-      }
-      chinaFallback = true;
-      // More than one China row -> take the highest valid price.
-      const valid = pool.filter(e => !isNaN(e.price));
-      if (valid.length > 1) pool = [valid.reduce((a, b) => (b.price > a.price ? b : a))];
-    }
-    if (pool.length > 1 && new Set(pool.map(e => e.price)).size > 1) {
+      chosen = decathlonHighestPrice(trues);
+      highestTaken = true;
+    } else if (pool.length > 1 && new Set(pool.map(e => e.price)).size > 1) {
       return { error: `Fabric price ambiguous (${pool.length} TRUE rows with different prices for DSM + Item code "${code}")` };
+    } else {
+      chosen = pool[0];
     }
   }
-  const chosen = pool[0];
   if (isNaN(chosen.price)) {
     return { error: chosen.rawPrice ? `Fabric price found, not a valid number ("${chosen.rawPrice}")` : 'Fabric price found, but Price cell is blank' };
   }
-  return { entry: chosen, chinaFallback };
+  return { entry: chosen, highestTaken, sharingMissing };
+}
+
+// Text for the Model code column (D) / report remark when a fallback price was used.
+function decathlonPricingFlag(p) {
+  if (!p) return '';
+  return p.sharingMissing ? 'Sharing price is missing' : (p.highestPriceTaken ? 'Highest price taken' : '');
 }
 
 function computeDecathlonFabricPricing(r, fabricPriceIndex) {
@@ -1156,7 +1159,7 @@ function computeDecathlonFabricPricing(r, fabricPriceIndex) {
   const e = res.entry;
   return {
     supplierText: e.supplier, isError: false, unitPrice: e.price,
-    needsApiMarker: false, highestPriceTaken: false, chinaFallback: !!res.chinaFallback,
+    needsApiMarker: false, highestPriceTaken: res.highestTaken, sharingMissing: res.sharingMissing,
     usableWidth: e.width,          // -> column G (Usable Width)
     apiMarkerText: e.region,       // -> column V (Api marker): region text, no % uplift for fabrics
   };
@@ -1213,9 +1216,6 @@ function fillDecathlonWorksheet(ws, extracted, r3List, priceIndex, fabricPriceIn
       // null for non-Interlining Fabrics rows -> supplier/price/Api marker
       // extraCols below all no-op for those, leaving the cells untouched.
       pricing: computeDecathlonPricing(r, sectionName, priceIndex, fabricPriceIndex),
-      // Length of the row's own (already-squashed) DSM code - drives the
-      // column C DSM-code formula override below.
-      dsmLen: squashDecathlonCode(r.dsm).length,
     }));
   };
   const extraCols = [
@@ -1229,7 +1229,7 @@ function fillDecathlonWorksheet(ws, extracted, r3List, priceIndex, fabricPriceIn
       // right next to the price it applies to rather than hidden in a
       // supplier-text comment.
       col: 4,
-      compute: it => !it.pricing ? null : (it.pricing.highestPriceTaken ? 'Highest price taken' : (it.pricing.chinaFallback ? 'China price taken' : null)),
+      compute: it => decathlonPricingFlag(it.pricing) || null,
     },
     {
       col: 6, // Component supplier — supplier name, or a "DSM is missing" /

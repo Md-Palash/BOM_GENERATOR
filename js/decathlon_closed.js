@@ -507,7 +507,7 @@ function dcbSnapshot(engine, ws, L, itemRows, cachedFallback) {
 const DCB_PRICE_COLORS = { changed: 'FFB7E1A1', same: 'FFFFC0CB', issue: 'FFFF7C80' };
 function dcbIsIssue(it) {
   if (it.kind === 'fail') return true;
-  if (it.kind === 'skip') return !(it.status === 'Skipped – non-continuous zipper' || (it.status === 'Skipped – no DSM' && (it.sec.name === 'Sales Packaging' || it.sec.name === 'Transport Packaging')));
+  if (it.kind === 'skip') return !(it.status === 'Skipped – no DSM' && (it.sec.name === 'Sales Packaging' || it.sec.name === 'Transport Packaging'));
   return false;
 }
 function dcbPriceColorKey(it) {
@@ -559,9 +559,9 @@ function dcbApplyPricing(ws, r, pricing) {
   else vCell.value = null;
 
   const dCell = ws.getCell(r, DCB.model);
-  if (pricing.highestPriceTaken) dCell.value = 'Highest price taken';
-  else if (pricing.chinaFallback) dCell.value = 'China price taken';
-  else if (['Highest price taken', 'China price taken'].includes(dcbCellText(ws, r, DCB.model))) dCell.value = null;
+  const flag = decathlonPricingFlag(pricing);
+  if (flag) dCell.value = flag;
+  else if (['Highest price taken', 'Sharing price is missing', 'China price taken'].includes(dcbCellText(ws, r, DCB.model))) dCell.value = null;
 
   if (pricing.usableWidth !== undefined) ws.getCell(r, DCB.width).value = pricing.usableWidth || null;
 }
@@ -673,7 +673,6 @@ function dcbRepairSheet(ws, L, T, items) {
   const tplWs = T.ws;
   const M = dcbMakeMapper(L, T);
   const out = { formulas: [], styles: [], dropdowns: [] };
-  const dsm7 = new Set(items.filter(it => it.dsm && it.dsm.length === 7).map(it => it.r));
 
   const restoreFormulas = (r, tr, mapRow, isItemRow) => {
     for (let c = 1; c <= DCB_MAXCOL; c++) {
@@ -828,9 +827,7 @@ function dcbProcessSheet(wb, ws, L, opts) {
     const flat = fabricStyle ? null : decathlonFlatRateFor(row);
 
     let pricing = null;
-    if (decathlonIsNonContinuousZipper(row, sec.name)) {
-      it.kind = 'skip'; it.status = 'Skipped – non-continuous zipper'; it.remark = 'Only continuous zippers ("CONTINU" in the Designation) are priced; previous price kept.';
-    } else if (!flat && !dsm) {
+    if (!flat && !dsm) {
       it.kind = 'skip'; it.status = 'Skipped – no DSM'; it.remark = 'No 10/7-digit DSM at the start of the Designation (starts with "' + des.slice(0, 24) + '"); row left unchanged.';
     } else if (fabricStyle && !opts.fabricIdx) {
       it.kind = 'skip'; it.status = 'Skipped – fabric list not loaded'; it.remark = 'Upload a fabric price list to update this row.';
@@ -851,8 +848,8 @@ function dcbProcessSheet(wb, ws, L, opts) {
       dcbApplyPricing(ws, r, pricing);
       it.pricing = pricing;
       it.remark = flat ? 'Flat rate' : (pricing.apiMarkerText ? 'Fabric price, region ' + pricing.apiMarkerText : (pricing.needsApiMarker ? 'Api marker +15% (non-Bangladesh origin)' : ''));
-      if (pricing.highestPriceTaken) it.remark += (it.remark ? '; ' : '') + 'Highest price taken (Item code not matched)';
-      if (pricing.chinaFallback) it.remark += (it.remark ? '; ' : '') + 'China price taken (several TRUE rows, Item code not matched; highest if more than one China row)';
+      const flag = decathlonPricingFlag(pricing);
+      if (flag) it.remark += (it.remark ? '; ' : '') + flag;
     }
   }
 
