@@ -1340,8 +1340,8 @@ async function buildSupplyChainWorkbook(rows){
 // Summary still lands on the right cells.
 //
 //   Fabric      = "TOTAL FABRIC COST" row
-//   Process     = "TOTAL PRINT/..." row  +  any Accessories row whose
-//                 description contains "quilting"
+//   Process     = "TOTAL PRINT/..." row  +  Quilting cost (helper: any
+//                 Accessories row whose description contains "quilting")
 //   Accessories = Accessories rows down to the LAST "sewing thread" row
 //                 (quilting rows excluded - they are counted in Process)
 //   Packaging   = Accessories rows below the last sewing thread, minus
@@ -1359,7 +1359,8 @@ async function buildSupplyChainWorkbook(rows){
 // thing that needs an array - finding the LAST "sewing thread" row - is
 // written as a true array formula (MAX(IF(...))), the form Excel always
 // evaluates as an array. Its result, and the other row numbers the formulas
-// need, sit in four helper cells at the far right of the sheet.
+// need (plus the quilting cost), sit in five helper cells at the far right
+// of the sheet, out of sight of the report.
 // ============================================================
 function xlSheetRef(name){ return "'" + String(name).replace(/'/g, "''") + "'"; }
 
@@ -1367,11 +1368,10 @@ function addSummarySheet(workbook, tabNames){
   const ws = workbook.addWorksheet('Summary');
   const headers = ['Style', 'Size', 'Fabric Cost', 'Process Cost [Print/EMB/Quilting]', 'Accessories Cost',
     'Packaging Cost', 'Wash Cost', 'Test Cost', 'CM', 'Others Cost', 'Total'];
-  const helperHeaders = ['Acc. header row', 'Acc. total row', 'Last sewing thread row', 'Thread/packaging split row'];
-  const HELPER_COL = 26; // column Z - well clear of the table
+  const helperHeaders = ['Acc. header row', 'Acc. total row', 'Last sewing thread row', 'Thread/packaging split row', 'Quilting cost'];
+  const HELPER_COL = 52; // column AZ - far to the right, out of sight of the report
   const mainWidths = [24, 30, 14, 22, 16, 16, 14, 14, 14, 14, 14];
   mainWidths.forEach((w, i) => { ws.getColumn(i + 1).width = w; });
-  for (let c = mainWidths.length + 1; c < HELPER_COL; c++) ws.getColumn(c).width = 2; // narrow gap
   for (let i = 0; i < helperHeaders.length; i++) ws.getColumn(HELPER_COL + i).width = 18;
 
   const headFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFBDD7EE' } }; // light blue
@@ -1399,7 +1399,7 @@ function addSummarySheet(workbook, tabNames){
   });
 
   const L = n => numToColLetter(n);
-  const hHdr = L(HELPER_COL), hTot = L(HELPER_COL + 1), hThr = L(HELPER_COL + 2), hSplit = L(HELPER_COL + 3);
+  const hHdr = L(HELPER_COL), hTot = L(HELPER_COL + 1), hThr = L(HELPER_COL + 2), hSplit = L(HELPER_COL + 3), hQuilt = L(HELPER_COL + 4);
 
   tabNames.forEach((tab, i) => {
     const r = i + 2;
@@ -1419,7 +1419,7 @@ function addSummarySheet(workbook, tabNames){
       1: `INDEX(${colB},MATCH("STYLE",${colA},0))&""`,
       2: `INDEX(${colB},MATCH("SIZE",${colA},0))&""`,
       3: find('TOTAL FABRIC*'),
-      4: `${find('TOTAL PRINT*')}+SUMIFS(${allO},${allB},"*quilting*")`,
+      4: `${find('TOTAL PRINT*')}+${hQuilt}${r}`,
       5: `SUM(${upO})-SUMIFS(${upO},${upB},"*quilting*")`,
       6: `IF(${noneBelow},0,SUM(${dnO})-SUMIFS(${dnO},${dnB},"*quilting*")-G${r})`,
       7: `IF(${noneBelow},0,SUMIFS(${dnO},${dnB},"*wash*")-SUMIFS(${dnO},${dnB},"*wash*",${dnB},"*quilting*"))`,
@@ -1445,11 +1445,13 @@ function addSummarySheet(workbook, tabNames){
       // description contains "sewing thread" (0 if there is none)
       { col: HELPER_COL + 2, value: { formula: `MAX(IF(ISNUMBER(SEARCH("sewing thread",${allB})),ROW(${allB})))`, shareType: 'array', ref: `${hThr}${r}` } },
       { col: HELPER_COL + 3, value: { formula: `IF(${hThr}${r}>0,${hThr}${r},${T}-1)` } },
+      // total of every Accessories row whose description contains "quilting" (added to Process)
+      { col: HELPER_COL + 4, value: { formula: `SUMIFS(${allO},${allB},"*quilting*")` } },
     ];
     helpers.forEach(h => {
       const c = ws.getCell(r, h.col);
       c.value = h.value;
-      c.numFmt = '0';
+      c.numFmt = h.col === HELPER_COL + 4 ? '0.0000' : '0';
       c.font = { color: { argb: 'FF6B7280' } };
       c.fill = helpFill;
       c.border = border;
