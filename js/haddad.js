@@ -1330,6 +1330,113 @@ async function buildSupplyChainWorkbook(rows){
   return { buffer, fabricWritten, trimsWritten };
 }
 
+// ============================================================
+// SUMMARY SHEET
+// One row per size tab: Fabric / Process / Accessories / Packaging / Wash /
+// Test / CM / Others / Total, all in the per-piece "O" column. Every figure
+// is a live Excel formula that FINDS its source by label, never by a fixed
+// row number, so rows can be added/deleted in a size tab (or columns
+// inserted - Excel re-points the O:O / B:B references itself) and the
+// Summary still lands on the right cells.
+//
+//   Fabric      = "TOTAL FABRIC COST" row
+//   Process     = "TOTAL PRINT/..." row  +  any Accessories row whose
+//                 description contains "quilting"
+//   Accessories = Accessories rows down to the LAST "sewing thread" row
+//                 (quilting rows excluded - they are counted in Process)
+//   Packaging   = Accessories rows below the last sewing thread, minus
+//                 wash and quilting rows
+//   Wash        = rows below the last sewing thread whose description
+//                 contains "wash" (searched only there, so a "wash care"
+//                 label up in the accessories block is not mistaken for it)
+//   Test        = the "FAB PERFORMANCE+ ..." row
+//   CM          = the "CM" row
+//   Others      = "Others/Commercial" row + "HADDAD COMMISSION" row
+//   Total       = sum of the nine columns above (equals Grand total FOB)
+//
+// Grey helper columns on the right hold the row numbers the formulas use,
+// so every step can be inspected.
+// ============================================================
+function xlSheetRef(name){ return "'" + String(name).replace(/'/g, "''") + "'"; }
+
+function addSummarySheet(workbook, tabNames){
+  const ws = workbook.addWorksheet('Summary');
+  const headers = ['Style', 'Size', 'Fabric Cost', 'Process Cost [Print/EMB/Quilting]', 'Accessories Cost',
+    'Packaging Cost', 'Wash Cost', 'Test Cost', 'CM', 'Others Cost', 'Total'];
+  const helperHeaders = ['Acc. header row', 'Acc. total row', 'Last sewing thread row', 'Thread/packaging split row', 'Quilting cost'];
+  const widths = [24, 30, 14, 20, 16, 16, 14, 14, 14, 14, 14, 3, 14, 14, 16, 18, 14];
+  widths.forEach((w, i) => { ws.getColumn(i + 1).width = w; });
+
+  const headFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2563EB' } };
+  const helpFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE5E7EB' } };
+  const thin = { style: 'thin', color: { argb: 'FFD1D5DB' } };
+  const border = { top: thin, left: thin, bottom: thin, right: thin };
+
+  const hr = ws.getRow(1);
+  hr.height = 36;
+  headers.forEach((h, i) => {
+    const c = hr.getCell(i + 1);
+    c.value = h;
+    c.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    c.fill = headFill;
+    c.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+    c.border = border;
+  });
+  helperHeaders.forEach((h, i) => {
+    const c = hr.getCell(13 + i);
+    c.value = h;
+    c.font = { bold: true, color: { argb: 'FF6B7280' } };
+    c.fill = helpFill;
+    c.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+    c.border = border;
+  });
+
+  tabNames.forEach((tab, i) => {
+    const r = i + 2;
+    const S = xlSheetRef(tab);
+    const find = (label, col) => `INDEX(${S}!$${col}:$${col},MATCH("${label}",${S}!$A:$A,0))`;
+    // the Accessories rows only (between its header and its total row)
+    const accB = `INDEX(${S}!$B:$B,M${r}+1):INDEX(${S}!$B:$B,N${r}-1)`;
+    const accO = `INDEX(${S}!$O:$O,M${r}+1):INDEX(${S}!$O:$O,N${r}-1)`;
+    const isQuilt = `ISNUMBER(SEARCH("quilting",${accB}))`;
+    const isWash = `ISNUMBER(SEARCH("wash",${accB}))`;
+    const below = `(ROW(${accB})>P${r})`;
+    const upTo = `(ROW(${accB})<=P${r})`;
+
+    const f = {
+      1: `INDEX(${S}!$B:$B,MATCH("STYLE",${S}!$A:$A,0))&""`,
+      2: `INDEX(${S}!$B:$B,MATCH("SIZE",${S}!$A:$A,0))&""`,
+      3: find('TOTAL FABRIC*', 'O'),
+      4: `${find('TOTAL PRINT*', 'O')}+Q${r}`,
+      5: `SUMPRODUCT(${upTo}*(1-${isQuilt}),${accO})`,
+      6: `SUMPRODUCT(${below}*(1-${isQuilt})*(1-${isWash}),${accO})`,
+      7: `SUMPRODUCT(${below}*${isWash}*(1-${isQuilt}),${accO})`,
+      8: find('FAB PERFORMANCE*', 'O'),
+      9: find('CM*', 'O'),
+      10: `${find('OTHERS*', 'O')}+${find('HADDAD COMMISSION*', 'O')}`,
+      11: `SUM(C${r}:J${r})`,
+      13: `MATCH("DESCRIPTION [ACCESSORIES]*",${S}!$B:$B,0)`,
+      14: `MATCH("TOTAL ACCESSORIES*",${S}!$A:$A,0)`,
+      15: `SUMPRODUCT(MAX(ISNUMBER(SEARCH("sewing thread",${accB}))*ROW(${accB})))`,
+      16: `IF(O${r}>0,O${r},N${r}-1)`,
+      17: `SUMPRODUCT(--${isQuilt},${accO})`,
+    };
+    for (const [col, formula] of Object.entries(f)) {
+      const c = ws.getCell(r, Number(col));
+      c.value = { formula };
+      c.border = border;
+      const n = Number(col);
+      if (n >= 3 && n <= 10 || n === 17) c.numFmt = '0.0000';
+      if (n === 11) { c.numFmt = '0.0000'; c.font = { bold: true }; }
+      if (n >= 13) { c.font = { color: { argb: 'FF6B7280' } }; c.fill = helpFill; if (n <= 16) c.numFmt = '0'; }
+    }
+  });
+
+  ws.views = [{ state: 'frozen', ySplit: 1 }];
+  workbook.calcProperties = Object.assign({}, workbook.calcProperties, { fullCalcOnLoad: true });
+  return ws;
+}
+
 async function mergeIntoCostBreakDown(templateArrayBuffer, extractedItems, productImage, headerInfo) {
   const isInterfacing = r => /interfacing/i.test(r.itemName || '');
 
@@ -1431,7 +1538,16 @@ async function mergeIntoCostBreakDown(templateArrayBuffer, extractedItems, produ
       { col: 16, compute: matchAccessorySupplier },
       { col: 17, compute: matchAccessoryRemark },
     ] };
-    ({ maxSheetRow: maxRow } = fillSection(ws, cfgAcc, accessoryItems, maxRow));
+    const accResult = fillSection(ws, cfgAcc, accessoryItems, maxRow);
+    maxRow = accResult.maxSheetRow;
+
+    // The template's last Accessories row (the wash line, price 0) ships with
+    // no description. Name it so the Summary sheet can recognise it as the
+    // wash cost - only filled when it's blank, so a manual edit is never
+    // overwritten. Done right here, before the Print/Fabric sections above
+    // insert rows, so accResult.totalRow still points at the right place.
+    const washCell = ws.getCell(accResult.totalRow - 1, 2);
+    if (!washCell.value) washCell.value = 'GARMENT ENZYME WASH';
 
     const cfgPrint = { ...SECTION_CONFIG.Print };
     ({ maxSheetRow: maxRow } = fillSection(ws, cfgPrint, printItems, maxRow));
@@ -1455,6 +1571,9 @@ async function mergeIntoCostBreakDown(templateArrayBuffer, extractedItems, produ
   // tabs - drop it so the file doesn't ship an extra untagged "Format"
   // sheet.
   workbook.removeWorksheet(masterWs.id);
+
+  // Extra "Summary" tab: one row per size tab, all live formulas.
+  addSummarySheet(workbook, counts.map(c => c.tab));
 
   const buffer = await workbook.xlsx.writeBuffer();
   return { buffer, counts };
