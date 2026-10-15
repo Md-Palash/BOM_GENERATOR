@@ -757,7 +757,10 @@ function dcbRepairSheet(ws, L, T, items) {
       const al = x => Object.assign({}, desired.alignment, { horizontal: 'center', vertical: 'middle' }, x || {});
       if (r <= 6 && c === 2) desired.alignment = al();
       if (isItemRow(r) && c === 7) desired.alignment = al();
-      if (isItemRow(r) && c === 9) desired.numFmt = DCB_ACCOUNTING_FMT;
+      const accCols = isItemRow(r) ? DECATHLON_ACC_ITEM_COLS
+        : (r === L.bomRow || L.sections.some(x => r === x.totalRow)) ? DECATHLON_ACC_TOTAL_COLS
+        : decathlonTailAccountingCols(tr);
+      if (accCols.includes(c)) desired.numFmt = DCB_ACCOUNTING_FMT;
       const keepRed = c === DCB.supplier && cell.font && cell.font.color && cell.font.color.argb === DCB_RED;
       if (keepRed) desired.font = Object.assign({}, desired.font, { color: { argb: DCB_RED } });
       const a = dcbStyleParts(cell.style), b = dcbStyleParts(desired);
@@ -976,7 +979,7 @@ function dcbBuildReport(run, meta) {
   const THIN = { style: 'thin', color: { argb: 'FF9CA3AF' } };
   const BORDER = { top: THIN, left: THIN, bottom: THIN, right: THIN };
   const CENTER = { horizontal: 'center', vertical: 'middle', wrapText: true };
-  const MONEY = '#,##0.0000';
+  const MONEY = DECATHLON_ACCOUNTING_FMT;
   const PCT = '0.00%';
 
   // Writes a value; digit-only text (DSM, item code, CC, tab name ...) becomes a REAL number so
@@ -1041,6 +1044,28 @@ function dcbBuildReport(run, meta) {
     { label: 'VENDOR PRICE', get: sn => sn.vendor, kind: 'total' },
   ];
 
+  /* ---------- Summary ---------- */
+  const ws1 = wb.addWorksheet('Summary');
+  const info = [
+    ['Generated', meta.generated], ['Cost sheet', meta.costSheetName],
+    ['Fabric price list', meta.fabricInfo], ['Accessories price list', meta.accInfo],
+    ['Tabs updated', run.results.length], ['Tabs skipped (not cost sheets)', (run.skippedTabs || []).join(', ') || '—'],
+  ];
+  info.forEach(([k, v], i) => {
+    ws1.getCell(i + 1, 1).value = k; ws1.getCell(i + 1, 1).font = { bold: true };
+    put(ws1, i + 1, 2, v); ws1.getCell(i + 1, 2).alignment = { horizontal: 'left' };
+  });
+  const h1 = ['Tab', 'Product', 'CC', 'R3', 'Items', 'Price updated', 'Price added', 'Info updated', 'No change', 'Not updated', 'Skipped'];
+  const hr = info.length + 2;
+  h1.forEach((h, i) => { ws1.getCell(hr, i + 1).value = h; });
+  run.results.forEach((s, i) => {
+    const c = s.counts, r = hr + 1 + i;
+    [s.sheetName, s.productName, s.cc, s.r3, c.total, c.priceUpdated, c.priceAdded, c.infoUpdated, c.noChange, c.notUpdated, c.skipped].forEach((v, j) => { put(ws1, r, j + 1, v); });
+  });
+  finishTable(ws1, hr, 1, hr + run.results.length, h1.length, [1, 3, 4]);
+  styleHeader(ws1, hr, 1, h1.length);
+  [26, 28, 12, 18, 9, 14, 12, 13, 11, 12, 9].forEach((w, i) => { ws1.getColumn(i + 1).width = w; });
+
   /* ---------- Section Costs ---------- */
   const ws2 = wb.addWorksheet('Section Costs');
   ['Tab', 'Line', 'Before (USD)', 'After (USD)', 'Δ (USD)', 'Δ %'].forEach((h, i) => { ws2.getCell(1, i + 1).value = h; });
@@ -1086,7 +1111,7 @@ function dcbBuildReport(run, meta) {
         it.old.supplier, it.new.supplier, it.old.width, it.new.width,
         it.costBefore, it.costAfter, null, it.status, it.remark || ''];
       vals.forEach((v, j) => { put(ws3, r3, j + 1, v); });
-      ['H', 'I', 'J'].forEach(L => { ws3.getCell(`${L}${r3}`).numFmt = '0.0000'; });
+      ['H', 'I', 'J'].forEach(L => { ws3.getCell(`${L}${r3}`).numFmt = MONEY; });
       ws3.getCell(r3, 11).numFmt = PCT;
       [16, 17, 18].forEach(n => { ws3.getCell(r3, n).numFmt = MONEY; });
       if (typeof it.old.price === 'number' && typeof it.new.price === 'number') {
@@ -1122,7 +1147,7 @@ function dcbBuildReport(run, meta) {
     for (const it of s.items) {
       if (!dcbIsIssue(it)) continue;
       [s.sheetName, it.sec.label, it.r, it.part, it.des, it.dsm, it.itemCode, it.remark || it.status, it.old.price, it.old.supplier].forEach((v, j) => { put(ws4, r4, j + 1, v); });
-      ws4.getCell(r4, 9).numFmt = '0.0000';
+      ws4.getCell(r4, 9).numFmt = MONEY;
       issueFills.push([r4, DCB_PRICE_COLORS.issue]);
       r4++;
     }
@@ -1133,29 +1158,6 @@ function dcbBuildReport(run, meta) {
   styleHeader(ws4, 1, 1, h4.length);
   [24, 18, 7, 22, 52, 13, 14, 70, 14, 40].forEach((w, i) => { ws4.getColumn(i + 1).width = w; });
   if (r4 > 3 || ws4.getCell(2, 1).value !== 'Nothing needs attention — every priced row was resolved.') ws4.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: h4.length } };
-
-  /* ---------- Repairs (template restore) ---------- */
-  const ws5 = wb.addWorksheet('Repairs');
-  const h5 = ['Tab', 'Type', 'Cell', 'Detail'];
-  h5.forEach((h, i) => { ws5.getCell(1, i + 1).value = h; });
-  let r5 = 2;
-  const STYLE_CAP = 400;
-  const tabBlocks5 = [];
-  for (const s of run.results) {
-    const blockStart = r5;
-    const rp = s.repairs || { formulas: [], styles: [], dropdowns: [] };
-    rp.formulas.forEach(x => { put(ws5, r5, 2, x.label ? 'Label restored' : 'Formula restored'); put(ws5, r5, 3, x.addr); put(ws5, r5, 4, x.formula); r5++; });
-    (rp.notRestored || []).forEach(x => { put(ws5, r5, 2, 'Formula NOT restored'); put(ws5, r5, 3, x.addr); put(ws5, r5, 4, x.formula + '  — would give an error with the current inputs; cell left as it was'); r5++; });
-    rp.dropdowns.forEach(x => { put(ws5, r5, 2, 'Dropdown restored'); put(ws5, r5, 3, x.addr); put(ws5, r5, 4, 'Width unit / Per unit list'); r5++; });
-    rp.styles.slice(0, STYLE_CAP).forEach(x => { put(ws5, r5, 2, 'Format reverted to template'); put(ws5, r5, 3, x.addr); put(ws5, r5, 4, x.what); r5++; });
-    if (rp.styles.length > STYLE_CAP) { put(ws5, r5, 2, 'Format reverted to template'); put(ws5, r5, 3, '…'); put(ws5, r5, 4, `${rp.styles.length - STYLE_CAP} more cells`); r5++; }
-    if (r5 === blockStart) { put(ws5, r5, 2, 'No repair needed'); put(ws5, r5, 4, 'Formulas and formatting already matched the template.'); r5++; }
-    tabBlocks5.push({ s, blockStart, blockEnd: r5 - 1 });
-  }
-  finishTable(ws5, 1, 1, r5 - 1, 4, [3]);
-  for (const tb of tabBlocks5) { put(ws5, tb.blockStart, 1, tb.s.sheetName); mergeTabBlock(ws5, tb.blockStart, tb.blockEnd); }
-  styleHeader(ws5, 1, 1, 4);
-  [24, 28, 12, 90].forEach((w, i) => { ws5.getColumn(i + 1).width = w; });
 
   return wb;
 }
@@ -1175,7 +1177,7 @@ function dcbAddComparisonSheet(wb, results) {
   const THIN = { style: 'thin', color: { argb: 'FF9CA3AF' } };
   const BORDER = { top: THIN, left: THIN, bottom: THIN, right: THIN };
   const TOTAL_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEFF4FF' } };
-  const MONEY = '#,##0.0000', PCT = '0.00%';
+  const MONEY = DECATHLON_ACCOUNTING_FMT, PCT = '0.00%';
   ['Tab', 'Line', 'Before (USD)', 'After (USD)', 'Δ (USD)', 'Δ %'].forEach((h, i) => {
     const c = ws.getCell(1, i + 1);
     c.value = h; c.font = { bold: true }; c.border = BORDER;

@@ -540,7 +540,18 @@ const DECATHLON_SECTION_CONFIG = {
 const DECATHLON_FIXED_CPM = 0.036;
 // Accounting format for Unit price (column I), 5 decimals so tiny flat rates
 // such as thread 0.00054 stay visible.
-const DECATHLON_ACCOUNTING_FMT = '_("$"* #,##0.00000_);_("$"* (#,##0.00000);_("$"* "-"??_);_(@_)';
+const DECATHLON_ACCOUNTING_FMT = '_("$"* #,##0.00_);_("$"* (#,##0.00);_("$"* "-"??_);_(@_)';
+// Cost / price columns that receive accounting format (Unit price, Local price, Total Local price, USD price).
+const DECATHLON_ACC_ITEM_COLS = [9, 16, 19, 21];
+const DECATHLON_ACC_TOTAL_COLS = [16, 19, 21];
+// Template rows below the BOM total that hold cost / price cells -> their accounting columns.
+function decathlonTailAccountingCols(tr) {
+  if (tr === 200) return DECATHLON_ACC_TOTAL_COLS;                       // Total bom cost
+  if (tr >= 204 && tr <= 214) return [10];                               // Process cost
+  if (tr === 215) return [12, 13];                                       // Total CPM/PPM price
+  if (tr === 218 || (tr >= 220 && tr <= 230) || (tr >= 233 && tr <= 236)) return [9, 11, 12]; // profit / other costs / prices
+  return [];
+}
 // A purely numeric string (e.g. Usable Width "150", a numeric-looking
 // supplier/type) is written as a real number so Excel never shows the green
 // "number stored as text" triangle. Values with a leading zero or more than
@@ -671,13 +682,14 @@ function fillSectionDecathlon(ws, cfg, items, maxSheetRow) {
   // pre-filled rows, unused rows, inserted rows) so every row is identical:
   //  - C: one uniform DSM-code formula
   //  - G (Usable width): centre / middle
-  //  - I (Unit price): accounting format
+  //  - I / P / S / U (cost & price columns): accounting format
   for (let r = cfg.firstBlank; r <= last; r++) {
     ws.getCell(r, 3).value = { formula: decathlonDsmFormula(r) };
     const g = ws.getCell(r, 7);
     decathlonStyleCell(g, { alignment: Object.assign({}, g.alignment, { horizontal: 'center', vertical: 'middle' }) });
-    decathlonStyleCell(ws.getCell(r, 9), { numFmt: DECATHLON_ACCOUNTING_FMT });
+    for (const c of DECATHLON_ACC_ITEM_COLS) decathlonStyleCell(ws.getCell(r, c), { numFmt: DECATHLON_ACCOUNTING_FMT });
   }
+  for (const c of DECATHLON_ACC_TOTAL_COLS) decathlonStyleCell(ws.getCell(cfg.totalRow, c), { numFmt: DECATHLON_ACCOUNTING_FMT });
 
   // Row-hiding is intentionally NOT done here. Sections are filled
   // bottom-to-top, so a section already filled (and hidden) can still be
@@ -863,6 +875,7 @@ function decathlonLookupPrice(priceIndex, dsm, itemCode) {
   const unknownOrigins = [...new Set(entries.map(e => e.origin).filter(o => !DECATHLON_REGION_PRIORITY.includes(o)))];
   if (unknownOrigins.length) return { unrecognizedOrigin: unknownOrigins[0] };
 
+  const allUsable = [];
   for (const region of DECATHLON_REGION_PRIORITY) {
     const regionEntries = entries.filter(e => e.origin === region);
     if (!regionEntries.length) continue;
@@ -895,48 +908,38 @@ function decathlonLookupPrice(priceIndex, dsm, itemCode) {
       return { unmatchedRegion: region, rawCurrency: regionEntries[0].currency };
     }
 
-    // Step 1: exact Item Code match, USD-declared preferred over
-    // CNY-declared when both exist for that same Item Code.
+    // Exact Item Code match, USD-declared preferred over CNY-declared when
+    // both exist for that same Item Code. Regions are walked in priority order.
     const itemMatches = usable.filter(e => e.itemCode === targetItemCode);
     if (itemMatches.length) {
       const chosen = itemMatches.find(e => e.currency === 'usd') || itemMatches[0];
       return { price: chosen.usdPrice, supplier: chosen.supplier, region };
     }
-
-    // Step 2: Item Code didn't match anything in this region - fall back
-    // to every usable price filed under this DSM in this region,
-    // regardless of Item Code.
-    const distinctPrices = [...new Set(usable.map(e => e.usdPrice))];
-    if (distinctPrices.length === 1) {
-      return { price: usable[0].usdPrice, supplier: usable[0].supplier, region };
-    }
-    const highest = usable.reduce((a, b) => (b.usdPrice > a.usdPrice ? b : a));
-    return { price: highest.usdPrice, supplier: highest.supplier, region, highestPriceTaken: true };
+    allUsable.push(...usable);
   }
-  return null;
+
+  // No Item Code matched in any region: pool every usable price filed under
+  // this DSM. All identical -> use it; otherwise the HIGHEST price wins
+  // regardless of region.
+  if (!allUsable.length) return null;
+  if (new Set(allUsable.map(e => e.usdPrice)).size === 1) {
+    return { price: allUsable[0].usdPrice, supplier: allUsable[0].supplier, region: allUsable[0].origin };
+  }
+  const highest = allUsable.reduce((x, y) => (y.usdPrice > x.usdPrice ? y : x));
+  return { price: highest.usdPrice, supplier: highest.supplier, region: highest.origin, highestPriceTaken: true };
 }
 
 const DECATHLON_RED_FONT = { color: { argb: 'FFCC0000' } };
 const DECATHLON_DEFAULT_FONT = { color: { argb: 'FF000000' } };
 
 // Decides what (if anything) goes in Component supplier / Unit price / Api
-// marker for one extracted row. Returns null when the row should be left
-// completely untouched (non-Interlining Fabrics rows — rule 3).
-//  1. Fabrics (except Interlining) -> untouched.
-//  2. Flat-rate categories (rule 10) -> always win, no price-file lookup.
-//  3. No DSM code -> "DSM is missing" in red, no price.
-//  4. Price-file lookup, Bangladesh -> China -> Vietnam. Within a region:
-//     an exact DSM+Item Code match wins outright; failing that, every
-//     price filed under that DSM in that region is compared - identical
-//     prices are used as-is, differing prices use the highest one and flag
-//     "Highest price taken" in the Model code column (see
-//     decathlonLookupPrice). No match anywhere -> "Price not found" in
-//     red. A higher-priority region's entry is NEVER silently skipped in
-//     favor of a lower-priority one: if it exists but its currency or
-//     origin text isn't recognized, that's reported explicitly in red
-//     instead.
-//  5. A match sourced from China or Vietnam gets an Api marker formula
-//     (Total Local price * 15%); Bangladesh does not.
+// marker for one extracted row (null = leave the cells untouched):
+//  1. Fabrics -> fabric price list (Interlining keeps its flat rate).
+//  2. Flat-rate categories always win, no price-file lookup.
+//  3. No DSM code -> "DSM is missing" in red.
+//  4. Accessories price list: exact Item Code match by region priority
+//     (Bangladesh -> China -> Vietnam); otherwise the highest price of the DSM.
+//  5. China / Vietnam-sourced prices get an Api marker formula (+15%).
 function computeDecathlonPricing(r, sectionName, priceIndex, fabricPriceIndex) {
   const isFabric = sectionName === 'Fabrics';
   const isInterlining = decathlonIsInterlining(r);
@@ -1101,6 +1104,11 @@ function buildDecathlonFabricPriceIndex(rows) {
 // checked); if several, the extracted Item Code must match. Anything that
 // can't be resolved cleanly returns { error } so it's flagged in red in the
 // sheet instead of silently guessing.
+// Highest valid price, but China-region rows take priority when any exist.
+function decathlonHighestPreferChina(rows) {
+  const china = rows.filter(e => decathlonNormalizeOrigin(e.region) === 'china');
+  return decathlonHighestPrice(china.length ? china : rows);
+}
 function decathlonHighestPrice(rows) {
   let best = null;
   for (const e of rows) if (!isNaN(e.price) && (!best || e.price > best.price)) best = e;
@@ -1111,7 +1119,8 @@ function decathlonHighestPrice(rows) {
 //  - a 7-digit DSM is searched as BOTH "NNNNNNN" and "980NNNNNNN" (the list
 //    often stores the 10-digit form); the sheet keeps the 7-digit code.
 //  - TRUE rows are used first. One TRUE row -> that row. Several TRUE rows ->
-//    the row(s) whose Item code matches; if none match -> the HIGHEST price.
+//    the row(s) whose Item code matches; if none match -> the HIGHEST price
+//    (China-region rows first, if any).
 //  - No TRUE row but FALSE rows exist -> the FALSE row (the HIGHEST if there
 //    are several), flagged "Sharing price is missing".
 function decathlonLookupFabricPrice(idx, dsm, itemCode) {
@@ -1123,7 +1132,7 @@ function decathlonLookupFabricPrice(idx, dsm, itemCode) {
   const trues = entries.filter(e => e.isTrue);
   let chosen, highestTaken = false, sharingMissing = false;
   if (!trues.length) {
-    chosen = decathlonHighestPrice(entries);
+    chosen = decathlonHighestPreferChina(entries);
     sharingMissing = true;
   } else if (trues.length === 1) {
     chosen = trues[0];
@@ -1131,7 +1140,7 @@ function decathlonLookupFabricPrice(idx, dsm, itemCode) {
     const code = squashDecathlonCode(itemCode);
     const pool = code ? trues.filter(e => e.itemCode === code) : [];
     if (!pool.length) {
-      chosen = decathlonHighestPrice(trues);
+      chosen = decathlonHighestPreferChina(trues);
       highestTaken = true;
     } else if (pool.length > 1 && new Set(pool.map(e => e.price)).size > 1) {
       return { error: `Fabric price ambiguous (${pool.length} TRUE rows with different prices for DSM + Item code "${code}")` };
@@ -1320,6 +1329,11 @@ function fillDecathlonWorksheet(ws, extracted, r3List, priceIndex, fabricPriceIn
     ws.getCell(r, 8).value = { formula: `ROUND(IF(A${r} <> "", IF(VLOOKUP(A${r}, 'Cbd-162735-CM-Process'!A:D, 2, FALSE) = "PPM", IF(G${r}<>"", G${r}, 0), IF(E${r}<>"", E${r}, 0)*(1+IF(F${r}<>"", F${r}, 0))), 0),4)` };
   }
 
+  // Accounting format (2 decimals) for the BOM total and the cost / price cells below it.
+  for (let tr = 200; tr <= 236; tr++) {
+    for (const c of decathlonTailAccountingCols(tr)) decathlonStyleCell(ws.getCell(tr + totalRowShift, c), { numFmt: DECATHLON_ACCOUNTING_FMT });
+  }
+
   return counts;
 }
 
@@ -1414,11 +1428,13 @@ function addDecathlonSummarySheet(workbook, sheetNames) {
     const r = i + 2;
     const q = "'" + name.replace(/'/g, "''") + "'";
     ws.getCell(r, 1).value = { formula: `${q}!B2` };   // CC (cell reference, follows the cell if rows/cols move)
-    ws.getCell(r, 2).value = name;                      // tab name (text)
+    const tabCell = ws.getCell(r, 2);                   // tab name: digit-only names as real numbers
+    tabCell.value = decathlonCoerceValue(name);
+    if (typeof tabCell.value === 'number') tabCell.numFmt = '0';
     DECATHLON_SUMMARY_COLUMNS.forEach((col, j) => {
       const cell = ws.getCell(r, 3 + j);
       cell.value = { formula: decathlonLookupFormula(name, col.label, col.labelCol, col.valueCol) };
-      cell.numFmt = '#,##0.0000';
+      cell.numFmt = DECATHLON_ACCOUNTING_FMT;
       if (keyCols.has(col.header)) { cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEFF4FF' } }; cell.font = { bold: true }; }
     });
     for (let c = 1; c <= headers.length; c++) {
