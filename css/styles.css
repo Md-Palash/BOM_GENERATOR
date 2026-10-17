@@ -376,6 +376,9 @@ body{
   padding:4px 9px; border-radius:100px;
 }
 
+/* six brand cards on the home screen: shrink to stay on one row on desktop */
+@media (min-width:901px){ #homeView .brand-card{ width:min(196px, calc((100% - 80px) / 6)); } }
+
 /* ---------- TOOL VIEW ---------- */
 .tool-view{ opacity:0; animation:fadeUp .4s var(--ease) forwards; }
 .back-btn{
