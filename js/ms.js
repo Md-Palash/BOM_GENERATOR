@@ -24,7 +24,7 @@
 
 const MS_LINE_TOL = 2.5;     // pt: items closer than this in y are on one visual line
 const MS_COL_TOL = 3;        // pt: slack when matching an item's x to a header's x
-const MS_CODE_RE = /^\d{4,7}(\s|$)/;
+const MS_CODE_RE = /^\d{4,7}(?=\D|$)/;
 const MS_SECTION_RE = /^(Fabrics?|Trims?|Labels?|Packaging|Processes|Other)\b/i;
 const MS_HEADER_KEYS = [
   ['name',        /(^|\s)Name$/i],
@@ -95,9 +95,64 @@ function parseMSHeader(items) {
   return { styleNo, stroke, description, season: [year, season].filter(Boolean).join(' ') };
 }
 
+// A header line is any line where at least 4 known column labels are found
+// (tolerant of wrapped/merged labels and stray whitespace).
+function msFindHeaderAnchors(texts) {
+  const anchors = [];
+  for (const [key, re] of MS_HEADER_KEYS) {
+    const hit = texts.find(i => re.test(msNorm(i.str)));
+    if (hit) anchors.push({ key, x: hit.x, w: hit.w || 0 });
+  }
+  const keys = anchors.map(a => a.key);
+  if (anchors.length < 4 || !(keys.includes('placement') || keys.includes('article'))) return null;
+  anchors.sort((a, b) => a.x - b.x);
+  // Column ownership does not depend on how the header label is aligned
+  // (left / centred): a column starts where the previous label's text ends
+  // (never later than its own label's start), and the first (Name) column
+  // owns everything to its left.
+  anchors.forEach((a, i) => {
+    if (i === 0) { a.bound = -Infinity; return; }
+    const p = anchors[i - 1];
+    const prevEnd = p.w > 0 ? p.x + p.w : (p.x + a.x) / 2;
+    a.bound = Math.min(prevEnd, a.x);
+  });
+  return anchors;
+}
+// Header cells are not guaranteed to share one baseline: wrapped / bold labels
+// ("Consumptio" + "n") float at different heights. So the header is found as a
+// small vertical BAND, and its zone extends over any wrapped label lines that
+// follow it closely (but never into the first data row).
+function msFindHeaders(items) {
+  const lines = msClusterLines(items, MS_LINE_TOL);
+  // only items that ARE column labels take part, so neighbouring data rows
+  // can never split or pollute a header
+  const labelItems = items.filter(i => MS_HEADER_KEYS.some(([, re]) => re.test(msNorm(i.str)))).sort((a, b) => a.y - b.y);
+  const groups = [];
+  for (const it of labelItems) {
+    const g = groups[groups.length - 1];
+    if (g && it.y - g.last <= 9) { g.items.push(it); g.last = it.y; }
+    else groups.push({ items: [it], last: it.y });
+  }
+  const out = [];
+  for (const g of groups) {
+    const anchors = msFindHeaderAnchors(g.items);
+    if (!anchors) continue;
+    const ys = g.items.map(i => i.y);
+    const top = Math.min(...ys), bottom = Math.max(...ys);
+    // the section title cell ("Fabrics", "Trims" ...) sits in the same header row
+    const titles = items.filter(i => MS_SECTION_RE.test(msNorm(i.str)) && i.y >= top - 9 && i.y <= bottom + 9);
+    let yEnd = bottom;
+    for (const l of lines) {
+      if (l.y <= yEnd + 0.1) continue;
+      if (l.y - yEnd <= 11 && l.y <= bottom + 20) yEnd = l.y; else break;
+    }
+    out.push({ y: bottom, top, yEnd, anchors, bandItems: [...g.items, ...titles] });
+  }
+  return out;
+}
 function msClassify(x, anchors) {
   let key = null;
-  for (const a of anchors) { if (a.x <= x + MS_COL_TOL) key = a.key; else break; }
+  for (const a of anchors) if (x >= a.bound - 0.01) key = a.key;
   return key;
 }
 
@@ -134,18 +189,10 @@ function parseMSBomPage(items, state, pageNo, debug) {
   const lines = msClusterLines(items, MS_LINE_TOL);
 
   const headers = [];
-  for (const line of lines) {
-    const texts = line.items;
-    if (!texts.some(i => /^Placement/i.test(i.str)) || !texts.some(i => /^Article/i.test(i.str))) continue;
-    const anchors = [];
-    for (const [key, re] of MS_HEADER_KEYS) {
-      const hit = texts.find(i => re.test(msNorm(i.str)));
-      if (hit) anchors.push({ key, x: hit.x });
-    }
-    anchors.sort((a, b) => a.x - b.x);
-    const titleItem = texts.find(i => MS_SECTION_RE.test(msNorm(i.str)));
+  for (const hb of msFindHeaders(items)) {
+    const titleItem = hb.bandItems.find(i => MS_SECTION_RE.test(msNorm(i.str)));
     const section = titleItem ? msSectionKey(msNorm(titleItem.str)) : (state.lastHeader ? state.lastHeader.section : 'other');
-    headers.push({ y: line.y, section, anchors });
+    headers.push({ y: hb.y, top: hb.top, yEnd: hb.yEnd, section, anchors: hb.anchors });
   }
   if (headers.length) state.lastHeader = headers[headers.length - 1];
 
@@ -158,9 +205,8 @@ function parseMSBomPage(items, state, pageNo, debug) {
 
   // One segment per table; a continuation page is a single segment that
   // reuses the previous page's header anchors.
-  const HDR_ZONE = 12; // wrapped header labels ("Supplier"/"Name") sit just under the header line
   const segments = headers.length
-    ? headers.map((h, i) => ({ h, y0: h.y + HDR_ZONE, y1: Math.min(botY, i + 1 < headers.length ? headers[i + 1].y - 1 : Infinity) }))
+    ? headers.map((h, i) => ({ h, y0: h.yEnd + 0.5, y1: Math.min(botY, i + 1 < headers.length ? headers[i + 1].top - 1 : Infinity) }))
     : (state.lastHeader ? [{ h: state.lastHeader, y0: topY, y1: botY }] : []);
 
   const rows = [];
@@ -234,6 +280,8 @@ async function extractMSPdf(file, onProgress) {
   const rows = [];
   const debug = [];
   const state = { lastHeader: null };
+  const dump = [`pages=${pdf.numPages}`];
+  const diag = { pages: pdf.numPages, bomPages: 0, headersFound: 0 };
 
   for (let p = 1; p <= pdf.numPages; p++) {
     onProgress && onProgress(p, pdf.numPages);
@@ -248,16 +296,23 @@ async function extractMSPdf(file, onProgress) {
       })
       .filter(it => it.str.trim().length > 0);
 
+    // raw dump of every item so a misread layout can be diagnosed
+    dump.push(`\n=== PAGE ${p}  rotation=${page.rotate}  size=${Math.round(viewport.width)}x${Math.round(viewport.height)}  items=${items.length}`);
+    msClusterLines(items, MS_LINE_TOL).forEach(l => dump.push(`y=${l.y.toFixed(1)}\t` + l.items.map(i => `[${i.x.toFixed(1)}|w${i.w.toFixed(1)}] ${JSON.stringify(i.str)}`).join('  ')));
+
     if (p === 1) header = parseMSHeader(items);
 
     const flat = items.map(i => i.str).join(' ');
     const footerSaysBom = /BOM:\s*BOM\b/i.test(flat);
-    const hasTableHeader = msClusterLines(items, MS_LINE_TOL).some(l =>
-      l.items.some(i => /^Placement/i.test(i.str)) && l.items.some(i => /^Article/i.test(i.str)));
-    if (!footerSaysBom && !hasTableHeader) continue; // Cover / Colourway / other pages
+    const headerLines = msFindHeaders(items);
+    diag.headersFound += headerLines.length;
+    if (!footerSaysBom && !headerLines.length) { debug.push({ page: p, skipped: true, items: items.length }); continue; }
+    diag.bomPages++;
+    const before = rows.length;
     rows.push(...parseMSBomPage(items, state, p, debug));
+    debug[debug.length - 1].rows = rows.length - before;
   }
-  return { header, rows, debug };
+  return { header, rows, debug, diag, dump: dump.join('\n') };
 }
 
 /* ============================================================
@@ -574,6 +629,8 @@ if (typeof document !== 'undefined' && document.getElementById('brandMS')) {
   const cbdLabelMS = document.getElementById('cbdLabelMS');
   const cbdStatusMS = document.getElementById('cbdStatusMS');
 
+  const debugBtnMS = document.getElementById('debugBtnMS');
+  let lastDumpMS = '';
   let currentFileMS = null, currentMSRows = null, currentMSItems = null, currentMSHeader = null;
 
   function setStatusMS(msg, cls) { statusMSEl.textContent = msg; statusMSEl.className = 'status' + (cls ? ' ' + cls : ''); }
@@ -598,7 +655,7 @@ if (typeof document !== 'undefined' && document.getElementById('brandMS')) {
   fileInputMS.addEventListener('change', e => { if (e.target.files.length) setFileMS(e.target.files[0]); });
   clearFileMS.addEventListener('click', e => {
     e.stopPropagation();
-    currentFileMS = null; fileInputMS.value = '';
+    currentFileMS = null; fileInputMS.value = ''; debugBtnMS.hidden = true;
     currentMSRows = null; currentMSItems = null; currentMSHeader = null;
     filebarMS.classList.remove('show');
     processBtnMS.disabled = true;
@@ -612,10 +669,11 @@ if (typeof document !== 'undefined' && document.getElementById('brandMS')) {
     processBtnMS.classList.add('loading');
     resultsMS.classList.remove('show');
     try {
-      const { header, rows, debug } = await extractMSPdf(currentFileMS, (p, total) => {
+      const { header, rows, debug, diag, dump } = await extractMSPdf(currentFileMS, (p, total) => {
         processLabelMS.textContent = `Scanning page ${p} / ${total}...`;
         setStatusMS(`Scanning page ${p} of ${total}...`);
       });
+      lastDumpMS = dump; debugBtnMS.hidden = false;
       console.log('[M&S] header', header);
       console.log('[M&S] table headers per page', debug);
       console.table(rows);
@@ -624,7 +682,7 @@ if (typeof document !== 'undefined' && document.getElementById('brandMS')) {
       const fabricRows = rows.filter(r => r.section === 'fabric').length;
       const trimRows = rows.filter(r => r.section === 'trim').length;
       if (fabricRows + trimRows === 0) {
-        setStatusMS('No Fabrics / Trims rows were found on the BOM pages of this PDF.', 'err');
+        setStatusMS(`No Fabrics / Trims rows were found. Pages: ${diag.pages}, BOM pages detected: ${diag.bomPages}, table header lines found: ${diag.headersFound}. Please click "Download debug info" below and send it so the layout can be checked.`, 'err');
       } else {
         const noPrice = rows.filter(r => (r.section === 'fabric' || r.section === 'trim') && !r.hasPrice).length;
         const warn = noPrice ? ` — ${noPrice} row(s) look incomplete (no price found), please check the extracted data` : '';
@@ -641,6 +699,15 @@ if (typeof document !== 'undefined' && document.getElementById('brandMS')) {
       processBtnMS.classList.remove('loading');
       processLabelMS.textContent = 'Extract Tech Pack';
     }
+  });
+
+  debugBtnMS.addEventListener('click', () => {
+    const blob = new Blob([lastDumpMS], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `ms_debug_${(currentFileMS && currentFileMS.name || 'techpack').replace(/\.pdf$/i, '')}.txt`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   });
 
   downloadBtnMS.addEventListener('click', () => {
