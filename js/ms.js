@@ -74,18 +74,51 @@ function msCellText(items) {
   return msClusterLines(items, MS_LINE_TOL).map(l => msJoinLine(l.items)).join(' ').replace(/\s+/g, ' ').trim();
 }
 
+// The cover is a 4-column label/value grid ("Style Number :" ... "10818268").
+// A value is read by POSITION: the first non-label item to the right of the
+// label on the same line, plus any wrapped continuation lines directly below
+// it in the same column. (Flattening the page to text would mix the columns.)
+function msLabelValue(items, labelRe) {
+  const label = items.find(i => labelRe.test(msNorm(i.str)));
+  if (!label) return '';
+  const inline = msNorm(label.str).replace(labelRe, '').trim();   // "Label : value" in one item
+  const labelEnd = label.x + (label.w || 0);
+  if (inline) {                              // "Season : T49 ..." as ONE item: continue in the label's own column
+    const parts = [inline]; let lastY = label.y;
+    for (const it of items.filter(i => Math.abs(i.x - label.x) <= 3 && i.y > label.y).sort((a, b) => a.y - b.y)) {
+      if (it.y - lastY > 9.5) break;
+      parts.push(msNorm(it.str)); lastY = it.y;
+    }
+    return msNorm(parts.join(' '));
+  }
+  const cands = items.filter(i => i !== label && Math.abs(i.y - label.y) <= MS_LINE_TOL && i.x >= labelEnd - 1 && !/:\s*$/.test(msNorm(i.str)))
+    .sort((a, b) => a.x - b.x);
+  if (!cands.length) return inline;
+  const first = cands[0];
+  const parts = [msNorm(first.str)];
+  let lastY = first.y;
+  for (const it of items.filter(i => Math.abs(i.x - first.x) <= 3 && i.y > first.y).sort((a, b) => a.y - b.y)) {
+    if (it.y - lastY > 9.5) break;          // next grid row, not a wrapped line
+    parts.push(msNorm(it.str)); lastY = it.y;
+  }
+  return msNorm(parts.join(' '));
+}
+
 function parseMSHeader(items) {
   const flat = msNorm(msClusterLines(items, MS_LINE_TOL).map(l => msJoinLine(l.items)).join(' '));
   const grab = re => { const m = flat.match(re); return m ? msNorm(m[1]) : ''; };
 
-  const styleNo = grab(/Style Number\s*:\s*(\d+)/i) || grab(/Style Number\s*:\s*([A-Za-z0-9-]+?)(?=\s|Product|$)/i);
-  const stroke = grab(/Stroke\s*:\s*(\d+)/i);
-  const description = grab(/Style Description\s*:\s*(.+?)\s*(?=Stroke\s*:|Block Reference|Sourcing Office|Supplier\s*:|$)/i);
+  const styleNo = (msLabelValue(items, /^Style Number\s*:/i).match(/^[A-Za-z0-9-]+/) || [''])[0]
+    || grab(/Style Number\s*:\s*(\d+)/i);
+  const stroke = (msLabelValue(items, /^Stroke\s*:/i).match(/^[A-Za-z0-9-]+/) || [''])[0]
+    || grab(/Stroke\s*:\s*(\d+)/i);
+  const description = msLabelValue(items, /^Style Description\s*:/i)
+    || grab(/Style Description\s*:\s*(.+?)\s*(?=Stroke\s*:|Block Reference|Sourcing Office|Supplier\s*:|$)/i);
 
-  // Season: only "<year> <season>", e.g. "2025 Spring". The header line
-  // reads "Season : T49 CASUAL OUTERWEAR 2025 Spring".
-  const si = flat.search(/Season\s*:/i);
-  const seg = si >= 0 ? flat.slice(si, si + 400) : flat;
+  // Season: only "<year> <season>", e.g. "2025 Spring". The value reads
+  // "T49 CASUAL OUTERWEAR" with "2025 Spring" wrapped onto the next line.
+  let seg = msLabelValue(items, /^Season\s*:/i) || flat;
+  if (!/20\d{2}/.test(seg)) seg = flat.slice(Math.max(0, flat.search(/Season\s*:/i)), flat.search(/Season\s*:/i) + 400) || flat;
   const SEAS = '(Spring|Summer|Fall|Autumn|Winter)';
   let year = '', season = '';
   let m = seg.match(new RegExp('\\b(20\\d{2})\\s*' + SEAS + '\\b', 'i'));
@@ -198,9 +231,10 @@ function parseMSBomPage(items, state, pageNo, debug) {
 
   // Page-level boundaries: the repeated page-header band (ends at the
   // "Designer :" line) and the legal footer.
-  const designer = items.filter(i => /^Designer/i.test(i.str));
-  const topY = designer.length ? Math.max(...designer.map(i => i.y)) + 2 : -Infinity;
-  const foot = items.filter(i => /^All orders placed|^All garments must comply|CONFIDENTIAL TO M&S/i.test(i.str));
+  const bandEnd = items.filter(i => /^(Supplier|Sourcing Office|Generated Date|Sample Required By|SO Product Merchandiser)\s*:/i.test(msNorm(i.str)));
+  const topY = bandEnd.length ? Math.max(...bandEnd.map(i => i.y)) + 2 : -Infinity;
+  // NB: "CONFIDENTIAL TO M&S  Page n of N" is the page label at the TOP of M&S pages, so it is not a footer marker.
+  const foot = items.filter(i => /^All orders placed|^All garments must comply|^This design document is CONFIDENTIAL/i.test(msNorm(i.str)));
   const botY = foot.length ? Math.min(...foot.map(i => i.y)) - 2 : Infinity;
 
   // One segment per table; a continuation page is a single segment that
@@ -261,6 +295,9 @@ function parseMSBomPage(items, state, pageNo, debug) {
 
     for (const r of rowInfo) {
       const t = k => msCellText(r.cols[k] || []);
+      // a code-like Name with nothing else in its row (no price / supplier / article / placement) is stray text, not a BOM row
+      const anyOther = Object.keys(r.cols).some(k => r.cols[k].length);
+      if (!anyOther) continue;
       rows.push({
         page: pageNo, section: seg.h.section,
         name: msCellText(r.name), supplier: t('supplier'), article: t('article'),
