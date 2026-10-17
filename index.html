@@ -7,6 +7,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <link rel="stylesheet" href="css/styles.css">
 <style>
   .hero-split-dec{display:flex;flex-wrap:wrap;gap:28px;}
@@ -74,6 +75,12 @@
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 438 440"><path d="M0 0h438v440H0z" fill="#011D45"/><path d="m349 230v7l1-3 4-3h6l1 1v34l-1 2h10v-2l-1-1v-33l1-1h7l4 4 1 3v-7l-1-1zm-70 0 2 2v34l-1 1h22l1 1 5-1 1-8-5 6-5 2h-8l-2-3v-14l1-1h4l4 5v1-13l-1 3-4 3h-3l-1-1v-15l1-1h11l5 5v1h1v-6l-1-1zm-61 0 4 7v2l2 3v2l2 3v2l2 3v2l2 3v2l2 3v2l2 4 4-8 2-7 3-6 2-2 2 1 2 4v2l3 6 3 10 4-8 1-5 2-3v-2l3-6 3-10 3-4h-5l2 2v2l-1 1-2 8-2 3-1 5-2 3-3-2-1-4-2-3-2-8-2-3v-3l1-1h-12l3 3 1 4 2 3v2l-3 5v2l-2 4-2 2-2-1-2-7-5-10v-2l-1-1v-3l1-1zm-39 0v6-1l4-4h3l1-1h3l1 1v35l-1 1h11l-2-2v-33l2-2 6 1 5 5v1-7zm-38 0 2 3v30l-1 1v2l-2 1h12l-2-2v-14l2-2 4 3 10 15h10l-2-1-10-14v-3l4-2 3-4v-7l-3-4-5-2zm11 0 7 1 2 1 2 3v9l-1 2-4 3h-6l-2-2v-15zm-92 0 1 1v34l-2 2h12l-2-2v-14l2-2h8l1-1h2l5-6v-5l-5-6h-2l-1-1zm10 0 5 1 4 4v8l-1 2-5 4h-3l-1-1v-17zm270 1-3 1-7-3h-4l-5 2-3 3-1 2v7l1 2 17 11 2 3v5l-4 4h-6l-1-1h-2l-5-5-2-4v-2 12l2-2h2l4 2h9l1-1h2l4-4 1-2v-7l-1-2-5-5-9-4-5-5v-5l3-3h7l7 6 1 3zm-238 0-7 7-2 5v11l2 5 3 4 4 3h2l4 2h9l7-3 5-5 3-6v-11l-3-7-6-5h-2l-4-2h-8l-1 1zm9-2 6 1 4 4 2 5v7l1 1v3l-1 1v7l-3 6-4 3h-7l-2-1-4-5-1-7-1-1v-9l1-1 1-7 4-5zm257-12v-2h-29l-15-7-1 1h-13l-1 1h-12l-1 1-23 1-1 1h-6l-1 1-12 1 18-1 10 5h4l1-1h4l1-1h6l1-1h4l1-1h5l1-1h5l1-1 14-2 7 9h4l1-1h12l1-1h12zm11-9-17-1-1-1h-5l-1-1h-6l-1-1h-5l-1-1h-2l-21-16-10-2-21-18h-8l-1 1h-2l-1-1h-4l-1-1h-4l-1-1h-5l-2-1-21-21h-1l-5-5v-1h-1l-9-9-3-1-9 8h-1l-2 3h-1l-28 26 2 3 21 11v4l-1 1-3-1-5-5h-3l-25-14h-5l-35 31-2 1h-2l-1-1h-8l-1 1h-3l-3 2h-3l-10 4h-8l-1-1h-3l-16 13h-1l-4 4v1h4l1 1h8l1 1h6l1 1h20l1-1h9l1-1h37l1 1h22-2l-1-1v-2l7-6h6l1 1h4l1 1h4l1 1h4l1 1h4l1 1h4l1 1h4l1 1 1-1 11-4 8-3h10l1-1h19l1-1h5l1-1h4l1-1h38l1-1h5l1-1h4l1-1 11 3 8 4h28l1-1h5l1-1zm-379-208v439h437-434l-1-1v-436l1-1h434v-1z" fill="#fff" fill-rule="evenodd"/><path d="m56 278v6l1 1h327v-7zm171-159-14-8h-9l-12 6-1 2h-1l-4 8v10l2 3v2l2 3 4 3 10-10h1l11-11 2-1 5 1 8 8v-8z" fill="#ff6b1a" fill-rule="evenodd"/></svg>
         </div>
         <div class="brand-card-name">Portwest</div>
+      </button>
+      <button class="brand-card" id="brandMS" style="--glow:rgba(17,24,39,.35);">
+        <div class="brand-card-mark brand-card-mark-fill">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="-75.5 -186.0 700 700"><rect x="-75.5" y="-186.0" width="700" height="700" fill="#1D1D1B"/><path d="M182.5 2.6v201.3H164V39.5L97.8 168.1h-13L18.5 39.8v164.1H0V2.6h19.3l72.1 139 72.1-139zm195.9 204.2L344.9 171c-12.1 19-28.6 32.9-55.7 32.9-34.9 0-60.6-24.2-60.6-53.9 0-24.8 15.3-40.1 44.7-56.8-16.7-16.7-26-30.6-26-47 0-23.9 20.2-43 44.7-43 26 0 45.3 19 45.3 43 0 23.1-18.2 38.6-36.3 50.5l41.5 45.3 24.5-39.8 14.7 9.2-27.1 44.1 37.2 39.5zm-93.5-101c-26.2 14.4-37.8 26-37.8 43.8 0 20.5 18.5 37.5 42.1 37.5 21.3 0 32.3-9.8 44.1-28.8zm-19.3-59.7c0 11.2 7.5 20.8 23.9 38.4 19.3-11.3 30-23.1 30-38.4 0-15-10.1-26.8-27.4-26.8-16.1 0-26.5 12.7-26.5 26.8m282.3-.5l-16.7 6.1C524.6 30.6 505.8 17 480.4 17c-27.7 0-45.8 13.8-45.8 37.2 0 50.2 114.8 23.6 114.8 94.3 0 33.7-27.1 57.4-67.5 57.4-37.5 0-60-17.9-75.5-46.4L422 150c10.4 21.9 29.4 38.9 58.3 38.9 33.4 0 50.8-15.3 50.8-40.7 0-50.5-114.8-25.7-114.8-94.3C416.3 13.2 452.9 0 480 0c30.4 0 58.1 13.8 67.9 45.6m-396.1 258h-19.6v-13h21v-5.3h-26.5v42.1h27.7v-5.2h-22.2v-13.4h19.6zm30.8-.2l-.2-.1c-6-1.7-9.3-2.9-9.3-6.8s3.3-6.4 8.4-6.4c4.2 0 7.4 1.7 8.8 4.9l.6 1.3 4.5-2.6-.4-1c-3-7.2-10.9-7.7-13.3-7.7-5.2 0-13.9 2.5-13.9 11.7 0 8.1 7.2 10.2 13.6 12.1 6.3 1.8 9.8 3.1 9.8 7.2 0 4.3-3.7 7.1-9.5 7.1-5.3 0-9.2-2.3-11.3-6.7l-.6-1.3-4.6 2.7.5 1.1c3 6 8.6 9.4 15.8 9.4 8.8 0 15-5.2 15-12.6-.1-8.3-7.7-10.5-13.9-12.3m36.2 24h5.5v-36.8h12.8v-5.3H206v5.3h12.8zm32.7-6.5c-1.9 0-3.6 1.6-3.6 3.5s1.6 3.6 3.6 3.6c1.9 0 3.6-1.6 3.6-3.6-.1-1.9-1.7-3.5-3.6-3.5m37.7 6.5h5.5V287H283l-.1 5.3h6.3zM415.8 287h-3.1L393 314.3v3.7h20.5v9.5h5.3V318h5.2v-4.6l-5.2-.5V287H416m-15.6 25.7l13.2-18.2v18.2zm-67.7-6.6c3.5-1.9 5.6-4.8 5.6-8.9 0-7.3-5.9-10.9-13-10.9-7.2 0-13 3.7-13 10.9 0 4.1 2 7 5.5 8.9-3.7 1.7-6.8 4.8-6.8 9.5 0 7.2 5.2 12.1 14.3 12.1 9.1 0 14.3-5.1 14.3-12.1-.1-4.7-3.2-7.7-6.9-9.5m-15.4-8.6c0-4.3 2.8-6.8 8-6.8 5.1 0 8 2.5 8 6.8s-4 6.5-8 6.5c-4.4 0-8-2.5-8-6.5m7.9 25.9c-5.1 0-9-2.5-9-7.7 0-4.9 4.3-7.3 9-7.3s9 2.4 9 7.3c0 5.2-3.9 7.7-9 7.7m47.7-17.3c3.5-1.9 5.6-4.8 5.6-8.9 0-7.3-5.9-10.9-13-10.9-7.2 0-13 3.7-13 10.9 0 4.1 2 7 5.5 8.9-3.7 1.7-6.8 4.8-6.8 9.5 0 7.2 5.2 12.1 14.3 12.1 9.1 0 14.3-5.1 14.3-12.1-.1-4.7-3.1-7.7-6.9-9.5m-15.4-8.6c0-4.3 2.9-6.8 8-6.8s8 2.5 8 6.8-4 6.5-8 6.5c-4.4 0-8-2.5-8-6.5m7.9 25.9c-5.1 0-9-2.5-9-7.7 0-4.9 4.3-7.3 9-7.3s9 2.4 9 7.3c.1 5.2-3.9 7.7-9 7.7" fill="#FFFFFF"/></svg>
+        </div>
+        <div class="brand-card-name">M&amp;S</div>
       </button>
     </div>
   </div>
@@ -906,6 +913,93 @@
     </div>
   </div>
 
+
+  <!-- ============ M&S HUB VIEW ============ -->
+  <div class="tool-view" id="msHubView" hidden>
+    <button class="back-btn" id="msHubBackBtn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+      Back
+    </button>
+
+    <div class="home-header">
+      <h1>M&amp;S <span>Workflow</span></h1>
+    </div>
+    <div class="brand-grid">
+      <button class="brand-card" id="msHubBomCard" style="--glow:rgba(17,24,39,.35); --mark-bg:#111827;">
+        <div class="brand-card-mark">
+          <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4"/><path d="M12 16h4"/><path d="M8 11h.01"/><path d="M8 16h.01"/></svg>
+        </div>
+        <div class="brand-card-name">Generate BOM</div>
+      </button>
+    </div>
+  </div>
+
+  <!-- ============ M&S TOOL VIEW (BOM / COST SHEET GENERATION) ============ -->
+  <div class="tool-view" id="msView" hidden>
+    <button class="back-btn" id="backBtnMS">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+      Back
+    </button>
+
+    <div class="card hero-card">
+      <div class="hero-top">
+        <div class="hero-copy">
+          <div class="badge"><span class="dot"></span>M&amp;S BOM Utility</div>
+          <h1>Tech Pack <span class="arrow-glyph">&rarr;</span> Open Costing</h1>
+        </div>
+        <div class="hero-pills">
+          <span class="pill">BOM</span>
+        </div>
+      </div>
+      <p class="lede">Upload an M&amp;S tech pack PDF. We read the page-1 header (Stroke, Style Number, Description, Season) and the Fabrics and Trims tables of the Bill of Materials, then fill the M&amp;S F.O.B. Open Costing sheet. Padding, filling, insulation, interlining and fusible items are moved to Fabric automatically.</p>
+    </div>
+
+    <div class="dropzone" id="dropzoneMS">
+      <input type="file" id="fileInputMS" accept="application/pdf">
+      <div class="dz-icon-wrap">
+        <svg class="dz-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M12 15l-4.5-4.5M12 15l4.5-4.5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+      </div>
+      <div class="dz-title">Drop the tech pack PDF here or click to browse</div>
+      <div class="dz-sub">RUNS ENTIRELY IN YOUR BROWSER &mdash; NOTHING IS UPLOADED</div>
+    </div>
+
+    <div class="filebar" id="filebarMS">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+      <span class="name" id="fileNameMS"></span>
+      <span class="clear" id="clearFileMS">&#10005; remove</span>
+    </div>
+
+    <button class="btn" id="processBtnMS" disabled>
+      <svg class="spinner" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"/><path d="M22 12a10 10 0 0 0-10-10" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>
+      <span id="processLabelMS">Extract Tech Pack</span>
+    </button>
+
+    <div class="status" id="statusMS"></div>
+
+    <div class="results" id="resultsMS">
+      <button class="btn secondary" id="downloadBtnMS" style="margin-top:0;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M12 15l-4.5-4.5M12 15l4.5-4.5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+        Download Extracted Data (Excel)
+      </button>
+
+      <div class="card cbd-section">
+        <div class="cbd-head">
+          <div class="icon-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"/><path d="M4 10h16M10 4v16"/></svg>
+          </div>
+          <div>
+            <h2>Generate Cost Sheet</h2>
+            <p>Fills the header, the Fabric table, the Trims columns and the Trims price summary of the M&amp;S Open Costing format. Woven Main / Size / Care labels and all packaging rows stay as they are, and no formula is changed. If Fabric needs more than three rows, rows are inserted automatically and the totals extend with them.</p>
+          </div>
+        </div>
+        <button class="btn" id="cbdBtnMS">
+          <svg class="spinner" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"/><path d="M22 12a10 10 0 0 0-10-10" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>
+          <span id="cbdLabelMS">Generate Cost Sheet</span>
+        </button>
+        <div class="status" id="cbdStatusMS"></div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script src="js/shared.js"></script>
@@ -915,5 +1009,6 @@
 <script src="js/malacca.js"></script>
 <script src="js/kariban.js"></script>
 <script src="js/portwest.js"></script>
+<script src="js/ms.js"></script>
 </body>
 </html>
