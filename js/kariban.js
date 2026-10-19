@@ -30,15 +30,22 @@
 
 const KARIBAN_PRODUCT_CODE_RE = /^[A-Z]{2}[a-z]{2}\d{4}/;
 
+// Brand-agnostic on purpose: different Kariban labels/brands title the same
+// report differently ("WK Labelling - PPE Category II", "Labelling Spasso - 001",
+// "Labelling Kariban Premium - 003", "WK Packing", "Spasso Packing", "Kariban
+// Premium Packing", "Hangtag garment Spasso" ...), so only the keyword counts.
 const KARIBAN_REPORT_TYPES = {
-  fabrics_trims: /^Fabrics\s*&\s*Trims$/i,
-  labelling: /^WK Labelling/i,
-  hangtag: /^WK Hangtag/i,
-  packing: /^WK Packing/i,
+  fabrics_trims: /^(?:.*\s)?Fabrics\s*&\s*Trims$/i,
+  labelling: /\bLabell?ing\b/i,
+  hangtag: /\bHang\s*-?\s*tag\b/i,
+  packing: /\bPacking\b/i,
 };
 
 function classifyKaribanReportType(rt) {
   if (!rt) return null;
+  // "Labeling details" / "Packing details" / "Fabric details" are per-item
+  // detail sheets, not placement tables.
+  if (/\bdetails?$/i.test(rt.trim())) return null;
   for (const key of Object.keys(KARIBAN_REPORT_TYPES)) {
     if (KARIBAN_REPORT_TYPES[key].test(rt)) return key;
   }
@@ -47,25 +54,39 @@ function classifyKaribanReportType(rt) {
 
 function normKariban(s) { return (s || '').replace(/\s+/g, ' ').trim(); }
 
-// Reads the fixed header band (KARIBAN | Style | ReportType | Draft+Date)
-// that appears at the same y-position on every page, and pulls out just
-// the report-type text (e.g. "Fabrics & Trims", "WK Packing"). Far more
-// stable than inferring report type from which columns are present.
-function readKaribanHeaderBand(items) {
+// Reads the fixed header band that appears at the same y-position on every
+// page: [Brand cell] [Style code] [Report type] [Status + date].
+//   "KARIBAN | SP705 | Fabrics & Trims | Draft-1 07/10/2026, 16:15"
+//   "Kariban Premium | PK611 | Labelling Kariban Premium - 003 | Approved-2 08/10/2025, 11:21"
+// The brand cell is NOT always the literal "KARIBAN" and the status cell is
+// not always "Draft-n" (it can be "Approved-2" ...), so the cells are located
+// by position/shape: the first cell is the brand, the next one that looks like
+// a style code is the style, and the report type is everything after that up
+// to the first status/date cell.
+function parseKaribanHeaderBand(items) {
   const band = items.filter(it => it.y >= 24 && it.y <= 40 && it.str.trim());
   band.sort((a, b) => a.x - b.x);
+  if (!band.length) return { brand: '', style: '', reportType: '' };
+  const isStatusOrDate = t =>
+    /^(Draft|Approved|Rejected|Submitted|Pending|Final|Frozen|Validated|Released)\b/i.test(t) ||
+    /\d{1,2}\/\d{1,2}\/\d{4}/.test(t) || /^\d{1,2}:\d{2}$/.test(t);
+  const brand = band[0].str.trim();
+  let rest = band.slice(1);
+  let style = '';
+  if (rest.length && /^[A-Z]{2,4}\d/.test(rest[0].str.trim())) {
+    style = rest[0].str.trim();
+    rest = rest.slice(1);
+  }
   const out = [];
-  let started = false;
-  for (const it of band) {
+  for (const it of rest) {
     const t = it.str.trim();
-    if (!t) continue;
-    if (t === 'KARIBAN') continue;
-    if (!started && /^[A-Z]{2,4}\d/.test(t)) continue; // style code repeat
-    if (/^Draft/.test(t) || /^\d{2}\/\d{2}\/\d{4}/.test(t) || /^\d{1,2}:\d{2}$/.test(t)) break;
-    started = true;
+    if (isStatusOrDate(t)) break;
     out.push(t);
   }
-  return out.join(' ').trim();
+  return { brand, style, reportType: out.join(' ').trim() };
+}
+function readKaribanHeaderBand(items) {
+  return parseKaribanHeaderBand(items).reportType;
 }
 
 // The "Placements" sub-heading sits at a fixed y on every placement-table
@@ -132,6 +153,23 @@ function isKaribanDividerLine(lineText) {
   return /\(\d+\)\s*$/.test(lineText);
 }
 
+// Value cell(s) to the right of a Properties-table label on the same row.
+// Stops at the next label on that row: on some packs two label/value pairs
+// share one row ("Designation (EN) <value> Gender MEN"), and taking every
+// token to the right glued the neighbouring pair onto the value.
+const KARIBAN_PROPERTY_LABELS = new Set(['Gender', 'Brand', 'Season', 'Age', 'Sizes', 'Style',
+  'Designation (EN)', 'Collection', 'Fit', 'Woven / Knit', 'Colour', 'Color']);
+function readKaribanRowValue(items, labelTok) {
+  const toks = items.filter(it => Math.abs(it.y - labelTok.y) <= 3 && it.x > labelTok.x + 20 && it.str.trim())
+    .sort((a, b) => a.x - b.x);
+  const out = [];
+  for (const t of toks) {
+    if (KARIBAN_PROPERTY_LABELS.has(normKariban(t.str))) break;
+    out.push(t.str.trim());
+  }
+  return out.join(' ').trim();
+}
+
 // Parses the WHOLE tech pack in a single pass across every placement-table
 // page, returning every row found (tagged with report type + section
 // divider) plus the style code/designation read once from page 1.
@@ -167,29 +205,31 @@ async function extractKaribanPlacementRows(file, onProgress) {
     // used for Supply Chain's Style No.
     if (p === 1 && !styleCode) {
       const styleLabel = items.find(it => normKariban(it.str) === 'Style');
-      if (styleLabel) {
-        const valTok = items.filter(it => Math.abs(it.y - styleLabel.y) <= 3 && it.x > styleLabel.x + 20)
-          .sort((a, b) => a.x - b.x);
-        styleCode = valTok.map(t => t.str.trim()).join(' ').trim();
-      }
+      if (styleLabel) styleCode = readKaribanRowValue(items, styleLabel);
       const desigLabel = items.find(it => normKariban(it.str) === 'Designation (EN)');
-      if (desigLabel) {
-        const valTok = items.filter(it => Math.abs(it.y - desigLabel.y) <= 3 && it.x > desigLabel.x + 20)
-          .sort((a, b) => a.x - b.x);
-        styleDesignation = valTok.map(t => t.str.trim()).join(' ').trim();
-      }
+      if (desigLabel) styleDesignation = readKaribanRowValue(items, desigLabel);
       // Brand - read the same way as Style/Designation above, from
       // whichever label token on page 1's Properties table matches "Brand".
       // Unlike Designation, the brand value is a short code (e.g. "WK"),
       // not a multi-word phrase - take only the single nearest token so a
       // closely-spaced adjacent Properties row can never bleed into this
-      // field. Left blank (same fallback as the two fields above) if this
-      // exact label text isn't found on this tech pack's page 1.
+      // field.
       const brandLabel = items.find(it => normKariban(it.str) === 'Brand');
       if (brandLabel) {
         const valTok = items.filter(it => Math.abs(it.y - brandLabel.y) <= 3 && it.x > brandLabel.x + 20)
           .sort((a, b) => a.x - b.x);
         styleBrand = valTok.length ? valTok[0].str.trim() : '';
+      }
+      // Fallback: not every Kariban tech pack has a "Style" row in the
+      // Properties table (e.g. the Spasso SP705 and Kariban Premium PK611
+      // packs don't) - but the header band printed on every page always
+      // carries the style code (and the brand cell), so use those. The brand
+      // fallback is limited to these packs so the older WK-format packs keep
+      // behaving exactly as before (the template's own default Brand stays).
+      if (!styleCode) {
+        const bandInfo = parseKaribanHeaderBand(items);
+        styleCode = bandInfo.style;
+        if (!styleBrand) styleBrand = bandInfo.brand;
       }
     }
 
@@ -301,13 +341,20 @@ function karibanWeightOf(product) {
 function isKaribanFabricDivider(d) { return !!d && d.startsWith('Fabrics'); }
 function isKaribanTrimDivider(d) { return !!d && d.startsWith('Trims'); }
 
-// Zipper merge (Trims only): Kariban zippers are always a consecutive run
-// of Trim rows sharing the exact same Placement text, starting with the
-// Slider and ending with whatever the assembly's final hardware piece is
-// (a literal "bottom stop" on a one-way zip, or a "pin and box" piece on a
-// two-way zip) - the defining signal is "consecutive same-Placement
-// TZip-code rows", not the specific name of the last part. Consumption on
-// the merged row is the Slider's own consumption, per business rule.
+// Zipper merge (Trims only): Kariban zippers are a consecutive run of Trim
+// rows (TZip codes) that all describe the same physical zipper - tape, top
+// stop, teeth, pin & box, slider/puller. Which zipper a row belongs to is
+// identified by its Placement text. Some packs leave Placement blank and put
+// the location in Remarks instead ("On middle front", "On pockets : Must be
+// reverse. Size 3"), so the part of Remarks before the first "." / ":" is used
+// as the location in that case. A run also ends as soon as a code repeats -
+// the same part (e.g. TZip0010 tape) showing up again means the next zipper
+// has started. Consumption on the merged row is the slider/puller's own.
+function karibanZipLocation(r) {
+  const pos = (r.position || '').trim().toLowerCase();
+  if (pos) return pos;
+  return (r._remarks || '').split(/[.:]/)[0].trim().toLowerCase();
+}
 function mergeKaribanZippers(trimItems) {
   const out = [];
   let i = 0;
@@ -315,21 +362,26 @@ function mergeKaribanZippers(trimItems) {
     const r = trimItems[i];
     const isZip = /^TZip/i.test(r.code);
     if (!isZip) { out.push(r); i++; continue; }
+    const loc = karibanZipLocation(r);
     const group = [r];
     let j = i + 1;
-    while (j < trimItems.length && /^TZip/i.test(trimItems[j].code) && trimItems[j].position === r.position) {
+    while (j < trimItems.length
+      && /^TZip/i.test(trimItems[j].code)
+      && karibanZipLocation(trimItems[j]) === loc
+      && !group.some(g => g.code === trimItems[j].code)) {
       group.push(trimItems[j]);
       j++;
     }
     if (group.length > 1) {
+      const slider = group.find(g => /slider|puller/i.test(g.description)) || group[0];
       out.push({
         bucket: 'Trim',
         item: '',
         code: group.map(g => g.code).join('+'),
         position: r.position,
         description: group.map(g => g.description).join(' + '),
-        consumption_qty: group[0].consumption_qty, // slider's own consumption
-        consumption_unit: group[0].consumption_unit,
+        consumption_qty: slider.consumption_qty, // slider's own consumption
+        consumption_unit: slider.consumption_unit,
         weight_gsm: '',
         size_mm: '',
       });
@@ -385,6 +437,7 @@ function applyKaribanBusinessRules(rows) {
         consumption_qty: commonQty, consumption_unit: unit,
         weight_gsm: bucket === 'Fabric' ? karibanWeightOf(product) : '',
         size_mm: bucket === 'Trim' ? commonSize : '',
+        _remarks: remarks,
       });
     } else if (cls === 'labelling' || cls === 'hangtag') {
       if (KARIBAN_EXCLUDE_KEYWORDS.test(group)) continue; // Label: exclude by Group keyword
